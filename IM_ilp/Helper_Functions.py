@@ -10,92 +10,6 @@ from local_pm4py.functions.functions import get_edge_weight
 from collections import defaultdict
 
 
-def log_to_graph_old(log):
-    edge_counts = defaultdict(int)
-    has_traces = False
-
-    # Handle PM4Py EventLog object
-    if hasattr(log, '__class__') and 'EventLog' in str(log.__class__):
-        for trace in log:
-            # Extract activity names from PM4Py events
-            activities = [event['concept:name'] for event in trace]
-
-            if not activities:
-                continue
-
-            has_traces = True
-            # Add edges
-            edge_counts[('start', activities[0])] += 1
-            edge_counts[(activities[-1], 'end')] += 1
-
-            # Add intermediate transitions
-            for i in range(len(activities) - 1):
-                edge_counts[(activities[i], activities[i + 1])] += 1
-
-    # Handle Counter input (where keys are tuples of activities)
-    elif isinstance(log, Counter):
-        for trace, count in log.items():
-            if not trace:  # Skip empty traces
-                continue
-
-            has_traces = True
-            # Convert tuple to list of activities
-            activities = list(trace)
-
-            # Add edges with frequency count
-            edge_counts[('start', activities[0])] += count
-            edge_counts[(activities[-1], 'end')] += count
-
-            # Add intermediate transitions
-            for i in range(len(activities) - 1):
-                edge_counts[(activities[i], activities[i + 1])] += count
-
-    # Handle list of traces input
-    else:
-        for trace in log:
-            # Skip empty traces
-            if not trace:
-                continue
-
-            # Extract activity names if events are dictionaries
-            if isinstance(trace[0], dict):
-                activities = [event["concept:name"] for event in trace]
-            else:
-                # Assume trace is already a list of activity names
-                activities = list(trace)
-
-            if not activities:
-                continue
-
-            has_traces = True
-            # Add edges (weight = 1 for each occurrence)
-            edge_counts[('start', activities[0])] += 1
-            edge_counts[(activities[-1], 'end')] += 1
-
-            # Add intermediate transitions
-            for i in range(len(activities) - 1):
-                edge_counts[(activities[i], activities[i + 1])] += 1
-
-    # Build the graph - ensure all nodes are strings
-    G = nx.DiGraph()
-
-    # Always add start and end nodes to the graph, even if empty
-    G.add_node('start')
-    G.add_node('end')
-
-    # Add edges from edge_counts
-    for (src, tgt), weight in edge_counts.items():
-        # Convert all nodes to strings to avoid PM4Py object issues
-        G.add_edge(str(src), str(tgt), weight=weight)
-
-    # If we have no traces but want to preserve the empty graph structure,
-    # we need to handle this case in your ILP functions
-    if not has_traces:
-        print("Warning: No valid traces found in log")
-
-    return G
-
-
 def log_to_graph(log):
     edge_counts = defaultdict(int)
     has_traces = False
@@ -186,14 +100,6 @@ def log_to_graph(log):
         print("Warning: No valid traces found in log")
 
     return G
-
-def preprocess_graph_old(G, start, end):
-    # Ensure all nodes are reachable from start and can reach end
-    reachable_from_start = nx.descendants(G, start) | {start}
-    reachable_to_end = nx.ancestors(G, end) | {end}
-    valid_nodes = reachable_from_start & reachable_to_end
-    return G.subgraph(valid_nodes), reachable_from_start, reachable_to_end
-
 
 def preprocess_graph(G, start, end):
     # Check if start and end nodes exist
@@ -290,7 +196,7 @@ def extract_activities(node_list):
     # Helper to filter out start/end if needed
     return {node for node in node_list if node not in {'start', 'end'}}
 
-
+# precalculated cost for parallel
 def cost_(G, sup=1):
     nodes = list(G.nodes())
     out_deg = {n: G.out_degree(n, weight='weight') for n in nodes}
@@ -313,6 +219,7 @@ def cost_(G, sup=1):
 
     return cost_dict
 
+#precalculated cost for sequence
 def cost_eventual(G_direct, log, sup=1.0):
     """
     Calculate eventual-follows costs for ALL possible edges according to Definition 9.
