@@ -6,7 +6,7 @@ import local_pm4py.split_functions.split as split
 from IM_ilp.seq_cut_ilp import seq_cut_ilp
 from IM_ilp.xor_cut_ilp import xor_cut_ilp, xor_cut_tau
 from IM_ilp.par_cut_ilp import par_cut_ilp
-from IM_ilp.loop_cut_ilp_test import loop_cut_ilp, loop_cut_tau
+from IM_ilp.loop_cut_ilp import loop_cut_ilp, loop_cut_tau
 
 
 class ProcessTreeNode:
