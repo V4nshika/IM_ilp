@@ -10,6 +10,7 @@ from IM_ilp.loop_cut_ilp import loop_cut_ilp, loop_cut_tau
 from pm4py.objects.process_tree.obj import ProcessTree
 from pm4py.objects.process_tree.utils import generic
 from pm4py.objects.process_tree.obj import Operator
+from pm4py.objects.conversion.process_tree.converter import apply as tree_to_petrinet
 
 
 class ProcessTreeNode:
@@ -423,3 +424,14 @@ def to_pm4py_tree(node, parent=None):
             child_tree = to_pm4py_tree(child, parent=tree)
             tree.children.append(child_tree)
     return tree
+
+
+def apply(log, sup =1):
+    import time
+    start = time.time()
+    process_tree = recursion_full(log, sup =0.6)
+    end = time.time()
+    time_taken = end - start
+    tree_data_pm4py = to_pm4py_tree(process_tree)
+    net, im, fm = tree_to_petrinet(tree_data_pm4py)
+    return net, im, fm, time_taken
