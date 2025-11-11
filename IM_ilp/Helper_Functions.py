@@ -289,7 +289,7 @@ def generate_nx_indirect_graph_from_log(log):
         #print("else is problem")
         log_counter = _convert_log_to_counter(log)
         #print("log counter done")
-        for trace, frequency in log_counter:
+        for trace, frequency in log_counter.items():
             _add_trace_to_eventual_graph(G, trace, frequency)
     
     return G
