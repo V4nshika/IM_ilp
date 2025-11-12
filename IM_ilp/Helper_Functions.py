@@ -227,6 +227,7 @@ def cost_eventual(G_direct, log, sup=1.0):
     """
     #print("graph start")
     # Build eventual-follows graph from log
+    #print("indirect graph start")
     G_eventual = generate_nx_indirect_graph_from_log(log)
     #print("graph done")
     # Calculate node frequencies from direct graph
@@ -236,13 +237,13 @@ def cost_eventual(G_direct, log, sup=1.0):
             node_freq[node] = sum(data.get('weight', 1) 
                                 for _, _, data in G_direct.out_edges(node, data=True))
     #print("node freq done")
-    # Calculate total frequency of all activities
+    #total frequency of all activities
     total_freq = sum(node_freq.values())
     
     if total_freq == 0:
         return {}
     
-    # Calculate costs for ALL activity pairs - this is edge-wise and partition-independent
+    #costs for ALL activity pairs - this is edge-wise and partition-independent
     cost_dict = {}
     activities = [node for node in G_direct.nodes() if node not in ['start', 'end']]
     #print("acts done")
@@ -251,14 +252,12 @@ def cost_eventual(G_direct, log, sup=1.0):
             if a == b:
                 continue
                 
-            # Get actual eventual-follows frequency from INDIRECT graph
+            #eventual-follows frequency from INDIRECT graph
             actual = G_eventual.get_edge_data(a, b, {'weight': 0})['weight']
             
-            # Calculate expected frequency using Definition 9 formula
-            # This depends ONLY on node frequencies, not on partition
             expected = (node_freq[a] * sup * node_freq[b]) / total_freq
             
-            # Edge-wise cost: max(0, expected - actual)
+            # max(0, expected - actual)
             cost = max(0, expected - actual)
             
             cost_dict[(a, b)] = cost
@@ -266,33 +265,6 @@ def cost_eventual(G_direct, log, sup=1.0):
     return cost_dict
 
 
-def generate_nx_indirect_graph_from_log(log):
-    """
-    Build eventual-follows graph from log.
-    
-    Args:
-        log: Event log (Counter of traces)
-    
-    Returns:
-        NetworkX DiGraph with eventual-follows relationships
-    """
-    G = nx.DiGraph()
-    #print("maybe this is the issue")
-    # Handle different log formats
-    if isinstance(log, Counter):
-        # log is Counter of traces
-        #print("counter is")
-        for trace, frequency in log.items():
-            _add_trace_to_eventual_graph(G, trace, frequency)
-    else:
-        # Assume log is list of traces
-        #print("else is problem")
-        log_counter = _convert_log_to_counter(log)
-        #print("log counter done")
-        for trace, frequency in log_counter.items():
-            _add_trace_to_eventual_graph(G, trace, frequency)
-    
-    return G
 
 def _convert_log_to_counter(log):
     """Convert any log format to Counter format"""
@@ -303,13 +275,11 @@ def _convert_log_to_counter(log):
     freq_dict = Counter()
     #print(log)
     
-    # Handle PM4Py EventLog object
     if hasattr(log, '__class__') and 'EventLog' in str(log.__class__):
         for trace in log:
             activities = tuple(event['concept:name'] for event in trace)
             freq_dict[activities] += 1
     
-    # Handle list of traces
     elif isinstance(log, list):
         for trace in log:
             if trace and isinstance(trace[0], dict):
@@ -323,30 +293,45 @@ def _convert_log_to_counter(log):
     
     return freq_dict
 
-def _add_trace_to_eventual_graph(G, trace, frequency):
-    """Helper to add a single trace to the eventual graph."""
+
+
+def generate_nx_indirect_graph_from_log(log):
+    """
+    Build eventual-follows graph from log.
+    (OPTIMIZED VERSION)
+    """
+    
+    edge_weights = defaultdict(int)
+
+    log_counter = _convert_log_to_counter(log)
+    
+    for trace, frequency in log_counter.items():
+        _add_trace_to_eventual_graph(edge_weights, trace, frequency)
+    
+    G = nx.DiGraph()
+    
+    G.add_edges_from((src, tgt, {'weight': weight}) 
+                     for (src, tgt), weight in edge_weights.items())
+    
+    return G
+
+def _add_trace_to_eventual_graph(edge_weights, trace, frequency):
+    """
+    Helper to add a single trace to the eventual graph.
+    THIS IS THE OPTIMIZED VERSION.
+    """
     if not trace:
         return
+
+    activities = list(trace) 
         
-    # Convert to list if needed
-    if isinstance(trace, tuple):
-        #print("if issue")
-        activities = list(trace)
-    else:
-        #print("else issue")
-        activities = trace
-        
-    #print("acts done")
     for i in range(len(activities)):
         visited = set()
+        src = activities[i]
         for j in range(i + 1, len(activities)):
-            if activities[j] not in visited:
-                visited.add(activities[j])
-                src = activities[i]
-                tgt = activities[j]
+            tgt = activities[j]
+            if tgt not in visited and src != tgt: 
+                visited.add(tgt)
                 
-                # Update edge weight
-                if G.has_edge(src, tgt):
-                    G[src][tgt]['weight'] += frequency
-                else:
-                    G.add_edge(src, tgt, weight=frequency)
+                # in-place edit
+                edge_weights[(src, tgt)] += frequency
