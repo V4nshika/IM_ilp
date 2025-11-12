@@ -330,38 +330,19 @@ def recursion_full(log, timing_data=None, depth=0, max_depth=20, sup=1.0):
     
     try:
         log1_counter, log2_counter = split.split(best_op, [best_Sigma_1, best_Sigma_2], log_counter)
-    
+        
         print(f"Split results:")
         print(f"  Log1: {len(log1_counter)} unique traces, {sum(log1_counter.values())} total occurrences")
         print(f"  Log2: {len(log2_counter)} unique traces, {sum(log2_counter.values())} total occurrences")
-    
-    # Enhanced validation based on operator type
-        is_tau_operator = best_op in ['exc_tau', 'loop_tau']
-    
-        if is_tau_operator:
-        # For tau operators, only log1 needs to be non-empty
-            if not log1_counter:
-                print("Tau cut produced empty non-tau log, using exclusive choice fallback")
-                return _create_exclusive_choice_node(all_activities)
-        # Log2 can be empty for tau cuts - that's expected
-            print("Tau cut detected - Log2 can be empty")
-        else:
-        # For regular binary operators, both logs should be non-empty
-            if not log1_counter or not log2_counter:
-                print(f"Binary {best_op} cut produced empty split, using exclusive choice fallback")
-                print(f"  Log1 empty: {not log1_counter}")
-                print(f"  Log2 empty: {not log2_counter}")
-                return _create_exclusive_choice_node(all_activities)
-    
-    # Recursively process the split logs
+        
+        if not log1_counter or not log2_counter:
+            print("One of the splits is empty, using exclusive choice fallback")
+            return _create_exclusive_choice_node(all_activities)
+        
+        # recursively process the split logs
         child1 = recursion_full(log1_counter, timing_data, depth + 1, max_depth, sup)
-    
-        if is_tau_operator:
-        # For tau operators, second child is always tau
-            child2 = ProcessTreeNode(activity="tau")
-        else:
-            child2 = recursion_full(log2_counter, timing_data, depth + 1, max_depth, sup)
-    
+        child2 = recursion_full(log2_counter, timing_data, depth + 1, max_depth, sup)
+        
         return ProcessTreeNode(operator=best_op, children=[child1, child2])
         
     except Exception as e:
