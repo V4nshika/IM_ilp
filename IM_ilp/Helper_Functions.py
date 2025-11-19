@@ -10,6 +10,92 @@ from local_pm4py.functions.functions import get_edge_weight
 from collections import defaultdict
 
 
+def log_to_graph_old(log):
+    edge_counts = defaultdict(int)
+    has_traces = False
+
+    # Handle PM4Py EventLog object
+    if hasattr(log, '__class__') and 'EventLog' in str(log.__class__):
+        for trace in log:
+            # Extract activity names from PM4Py events
+            activities = [event['concept:name'] for event in trace]
+
+            if not activities:
+                continue
+
+            has_traces = True
+            # Add edges
+            edge_counts[('start', activities[0])] += 1
+            edge_counts[(activities[-1], 'end')] += 1
+
+            # Add intermediate transitions
+            for i in range(len(activities) - 1):
+                edge_counts[(activities[i], activities[i + 1])] += 1
+
+    # Handle Counter input (where keys are tuples of activities)
+    elif isinstance(log, Counter):
+        for trace, count in log.items():
+            if not trace:  # Skip empty traces
+                continue
+
+            has_traces = True
+            # Convert tuple to list of activities
+            activities = list(trace)
+
+            # Add edges with frequency count
+            edge_counts[('start', activities[0])] += count
+            edge_counts[(activities[-1], 'end')] += count
+
+            # Add intermediate transitions
+            for i in range(len(activities) - 1):
+                edge_counts[(activities[i], activities[i + 1])] += count
+
+    # Handle list of traces input
+    else:
+        for trace in log:
+            # Skip empty traces
+            if not trace:
+                continue
+
+            # Extract activity names if events are dictionaries
+            if isinstance(trace[0], dict):
+                activities = [event["concept:name"] for event in trace]
+            else:
+                # Assume trace is already a list of activity names
+                activities = list(trace)
+
+            if not activities:
+                continue
+
+            has_traces = True
+            # Add edges (weight = 1 for each occurrence)
+            edge_counts[('start', activities[0])] += 1
+            edge_counts[(activities[-1], 'end')] += 1
+
+            # Add intermediate transitions
+            for i in range(len(activities) - 1):
+                edge_counts[(activities[i], activities[i + 1])] += 1
+
+    # Build the graph - ensure all nodes are strings
+    G = nx.DiGraph()
+
+    # Always add start and end nodes to the graph, even if empty
+    G.add_node('start')
+    G.add_node('end')
+
+    # Add edges from edge_counts
+    for (src, tgt), weight in edge_counts.items():
+        # Convert all nodes to strings to avoid PM4Py object issues
+        G.add_edge(str(src), str(tgt), weight=weight)
+
+    # If we have no traces but want to preserve the empty graph structure,
+    # we need to handle this case in your ILP functions
+    if not has_traces:
+        print("Warning: No valid traces found in log")
+
+    return G
+
+
 def log_to_graph(log):
     edge_counts = defaultdict(int)
     has_traces = False
@@ -100,6 +186,14 @@ def log_to_graph(log):
         print("Warning: No valid traces found in log")
 
     return G
+
+def preprocess_graph_old(G, start, end):
+    # Ensure all nodes are reachable from start and can reach end
+    reachable_from_start = nx.descendants(G, start) | {start}
+    reachable_to_end = nx.ancestors(G, end) | {end}
+    valid_nodes = reachable_from_start & reachable_to_end
+    return G.subgraph(valid_nodes), reachable_from_start, reachable_to_end
+
 
 def preprocess_graph(G, start, end):
     # Check if start and end nodes exist
@@ -196,7 +290,7 @@ def extract_activities(node_list):
     # Helper to filter out start/end if needed
     return {node for node in node_list if node not in {'start', 'end'}}
 
-# precalculated cost for parallel
+
 def cost_(G, sup=1):
     nodes = list(G.nodes())
     out_deg = {n: G.out_degree(n, weight='weight') for n in nodes}
@@ -219,7 +313,6 @@ def cost_(G, sup=1):
 
     return cost_dict
 
-#precalculated cost for sequence
 def cost_eventual(G_direct, log, sup=1.0):
     """
     Calculate eventual-follows costs for ALL possible edges according to Definition 9.
@@ -237,13 +330,13 @@ def cost_eventual(G_direct, log, sup=1.0):
             node_freq[node] = sum(data.get('weight', 1) 
                                 for _, _, data in G_direct.out_edges(node, data=True))
     #print("node freq done")
-    #total frequency of all activities
+    # Calculate total frequency of all activities
     total_freq = sum(node_freq.values())
     
     if total_freq == 0:
         return {}
     
-    #costs for ALL activity pairs - this is edge-wise and partition-independent
+    # Calculate costs for ALL activity pairs - this is edge-wise and partition-independent
     cost_dict = {}
     activities = [node for node in G_direct.nodes() if node not in ['start', 'end']]
     #print("acts done")
@@ -252,12 +345,14 @@ def cost_eventual(G_direct, log, sup=1.0):
             if a == b:
                 continue
                 
-            #eventual-follows frequency from INDIRECT graph
+            # Get actual eventual-follows frequency from INDIRECT graph
             actual = G_eventual.get_edge_data(a, b, {'weight': 0})['weight']
             
+            # Calculate expected frequency using Definition 9 formula
+            # This depends ONLY on node frequencies, not on partition
             expected = (node_freq[a] * sup * node_freq[b]) / total_freq
             
-            # max(0, expected - actual)
+            # Edge-wise cost: max(0, expected - actual)
             cost = max(0, expected - actual)
             
             cost_dict[(a, b)] = cost
@@ -269,17 +364,19 @@ def cost_eventual(G_direct, log, sup=1.0):
 def _convert_log_to_counter(log):
     """Convert any log format to Counter format"""
     if isinstance(log, Counter):
-        print("__")
+        #print("__")
         return log
     
     freq_dict = Counter()
     #print(log)
     
+    # Handle PM4Py EventLog object
     if hasattr(log, '__class__') and 'EventLog' in str(log.__class__):
         for trace in log:
             activities = tuple(event['concept:name'] for event in trace)
             freq_dict[activities] += 1
     
+    # Handle list of traces
     elif isinstance(log, list):
         for trace in log:
             if trace and isinstance(trace[0], dict):
@@ -293,29 +390,33 @@ def _convert_log_to_counter(log):
     
     return freq_dict
 
-
+# In Helper_Functions.py
 
 def generate_nx_indirect_graph_from_log(log):
     """
     Build eventual-follows graph from log.
-    (OPTIMIZED VERSION)
+    THIS IS THE OPTIMIZED VERSION.
     """
-    
+    # 1. Use a defaultdict (your "master dict" for this task)
     edge_weights = defaultdict(int)
 
+    # 2. Convert log to Counter (if not already)
+    # This also handles all the different log types
     log_counter = _convert_log_to_counter(log)
     
+    # 3. Populate the dict. This is the fast "in-place editing."
     for trace, frequency in log_counter.items():
         _add_trace_to_eventual_graph(edge_weights, trace, frequency)
     
+    # 4. Build the graph ONCE from the aggregated weights
     G = nx.DiGraph()
-    
+    # This is much, much faster than adding edges one by one
     G.add_edges_from((src, tgt, {'weight': weight}) 
                      for (src, tgt), weight in edge_weights.items())
     
     return G
 
-def _add_trace_to_eventual_graph(edge_weights, trace, frequency):
+def _add_trace_to_eventual_graph(edge_weights, trace, frequency): # Note: G is now edge_weights
     """
     Helper to add a single trace to the eventual graph.
     THIS IS THE OPTIMIZED VERSION.
@@ -323,6 +424,7 @@ def _add_trace_to_eventual_graph(edge_weights, trace, frequency):
     if not trace:
         return
 
+    # No need to convert, _convert_log_to_counter already gives tuples
     activities = list(trace) 
         
     for i in range(len(activities)):
@@ -330,8 +432,11 @@ def _add_trace_to_eventual_graph(edge_weights, trace, frequency):
         src = activities[i]
         for j in range(i + 1, len(activities)):
             tgt = activities[j]
+            # Add check to avoid self-loops if not needed
             if tgt not in visited and src != tgt: 
                 visited.add(tgt)
                 
-                # in-place edit
+                # This is the "in-place edit"
+                # It's one of the fastest operations in Python.
+                # No G.has_edge() or G[src][tgt] lookups.
                 edge_weights[(src, tgt)] += frequency

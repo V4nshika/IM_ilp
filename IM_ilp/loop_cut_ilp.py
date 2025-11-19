@@ -1,6 +1,6 @@
 import gurobipy as gp
 from gurobipy import GRB
-from IM_ilp_gurobi.Helper_Functions import preprocess_graph, extract_activities, log_to_graph
+from IM_ilp.Helper_Functions import preprocess_graph, extract_activities, log_to_graph
 import numpy as np
 from local_pm4py.cut_quality.cost_functions.cost_functions import cost_loop
 

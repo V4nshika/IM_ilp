@@ -1,6 +1,6 @@
 import gurobipy as gp
 from gurobipy import GRB
-from IM_ilp_gurobi.Helper_Functions import preprocess_graph, cost_eventual, extract_activities
+from IM_ilp.Helper_Functions import preprocess_graph, cost_eventual, extract_activities
 import numpy as np
 
 def nx_to_mat_and_weights_seq(G, log, sup=1.0):
