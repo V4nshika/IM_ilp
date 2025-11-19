@@ -1,123 +1,133 @@
-import pulp
+import gurobipy as gp
+from gurobipy import GRB
 from IM_ilp.Helper_Functions import preprocess_graph, nx_to_mat_and_weights, extract_activities, cost_
+import numpy as np
 
 def par_cut_ilp(G, sup=1.0):
     start_node = 'start'
     end_node = 'end'
 
-    # Preprocess graph
+    # 1. Preprocess graph
     reduced_graph, _, _ = preprocess_graph(G, start_node, end_node)
-    #print("processed")
-    A, W, node_names, node_index = nx_to_mat_and_weights(reduced_graph, sup)
-    #print("nx done")
+    A, _, node_names, node_index = nx_to_mat_and_weights(reduced_graph, sup)
     n = A.shape[0]
-    #print(node_names, node_index)
 
+    # 2. Get cost matrix
     W = cost_(G, sup)  # This has costs for ALL possible pairs
-    #print("cost done")
-    #print(W)
+    
+    # 3. Handle graph/node indices
+    if n == 0 or not node_names:
+        return set(), set(), None, []
+
     start_idx = node_names.index(start_node)
     end_idx = node_names.index(end_node)
     non_terminal = [i for i in range(n) if i not in (start_idx, end_idx)]
-    #print(f"non_terminal done: {len(non_terminal)} nodes")
+    
+    if not non_terminal:
+        # Graph only contains start/end nodes
+        return set(), set(), None, node_names
 
-    # ILP Model
-    prob = pulp.LpProblem("PAR_MinCut_Flow_Corrected", pulp.LpMinimize)
+    # === Gurobipy Model  ===
+    model = gp.Model("PAR_MinCut_Flow_Corrected")
+    model.setParam('OutputFlag', 0) # Suppress console output
 
-    # Partition variables
-    x = pulp.LpVariable.dicts("x", non_terminal, cat=pulp.LpBinary)
+    # --- Variables  ---
+    
+    # Partition variables: x[i]
+    x = model.addVars(non_terminal, vtype=GRB.BINARY, name="x")
 
-    # Edge cut indicators for ALL possible pairs between non-terminal nodes
-    y = pulp.LpVariable.dicts("y", [(i, j) for i in non_terminal for j in non_terminal], cat=pulp.LpBinary)
+    # Cost/Cut variables: y[i,j] for ALL non-terminal pairs
+    y_indices = [(i, j) for i in non_terminal for j in non_terminal]
+    y = model.addVars(y_indices, vtype=GRB.BINARY, name="y")
 
+    # --- 2-FLOWS  ---
+    
     # Flow variables (reachability from start) - only for existing edges
-    f_s = pulp.LpVariable.dicts("f_s", [(i, j) for i in range(n) for j in range(n) if A[i, j]], lowBound=0, cat='Integer')
+    edge_indices = [(i, j) for i in range(n) for j in range(n) if A[i, j]]
+    f_s = model.addVars(edge_indices, vtype=GRB.INTEGER, lb=0, name="f_s")
     
     # Flow variables (reachability to end) - only for existing edges  
-    f_e = pulp.LpVariable.dicts("f_e", [(i, j) for i in range(n) for j in range(n) if A[i, j]], lowBound=0, cat='Integer')
+    f_e = model.addVars(edge_indices, vtype=GRB.INTEGER, lb=0, name="f_e")
 
-    #### Constraints ####
+    # === Constraints  ===
 
-    # Define y variables for ALL pairs (i,j) where i != j and i,j in non_terminal
-    # y[(i,j)] = 1 if x[i] != x[j] (nodes in different partitions)
+    # 1. Define y cost variables
     for i in non_terminal:
         for j in non_terminal:
             if i != j:
-                prob += y[(i, j)] >= x[i] - x[j]
-                prob += y[(i, j)] >= x[j] - x[i]
+                model.addConstr(y[i, j] >= x[i] - x[j])
+                model.addConstr(y[i, j] >= x[j] - x[i])
             else:
-                prob += y[(i, j)] == 0 
-                # No upper bound needed since we're minimizing
+                model.addConstr(y[i, j] == 0)
 
-    # Non-trivial partition constraint
-    prob += pulp.lpSum(x[i] for i in non_terminal) >= 1
-    prob += pulp.lpSum(1 - x[i] for i in non_terminal) >= 1
+    # 2. Non-trivial partition constraints
+    model.addConstr(gp.quicksum(x[i] for i in non_terminal) >= 1, name="non_trivial_1")
+    model.addConstr(gp.quicksum(1 - x[i] for i in non_terminal) >= 1, name="non_trivial_2")
 
-    ##### Flow reachability from start #####
-    # Send (n-1) units of flow from start
-    prob += pulp.lpSum(f_s[(start_idx, j)] for j in range(n) if A[start_idx, j]) == n - 1
+    M = n - 1
+
+    # 3. Flow reachability from start (f_s)
+    model.addConstr(f_s.sum(start_idx, '*') == M, name="f_s_start_flow")
 
     for i in range(n):
         if i == start_idx:
             continue
-        inflow = pulp.lpSum(f_s[(j, i)] for j in range(n) if A[j, i])
-        outflow = pulp.lpSum(f_s[(i, j)] for j in range(n) if A[i, j])
-        prob += (inflow - outflow) == 1
+        # (inflow - outflow) == 1
+        model.addConstr(f_s.sum('*', i) - f_s.sum(i, '*') == 1, name=f"f_s_node_{i}")
 
-    # Block flow through cut edges (only for existing edges)
-    for (i, j) in f_s:
+    # Block flow through cut edges
+    for (i, j) in edge_indices:
         if i in non_terminal and j in non_terminal:
-            prob += f_s[(i, j)] <= (n - 1) * (1 - y[(i, j)])
+            # f_s[(i, j)] <= (n - 1) * (1 - y[(i, j)])
+            model.addConstr(f_s[i, j] <= M * (1 - y[i, j]), name=f"f_s_cap_{i}_{j}")
 
-    ##### Flow reachability to end #####
+    # 4. Flow reachability to end (f_e)
     # Receive (n-1) units of flow at end
-    prob += pulp.lpSum(f_e[(i, end_idx)] for i in range(n) if A[i, end_idx]) == n - 1
+    model.addConstr(f_e.sum('*', end_idx) == M, name="f_e_end_flow")
 
     for i in range(n):
         if i == end_idx:
             continue
-        inflow = pulp.lpSum(f_e[(j, i)] for j in range(n) if A[j, i])
-        outflow = pulp.lpSum(f_e[(i, j)] for j in range(n) if A[i, j])
-        prob += (outflow - inflow) == 1
+        # (outflow - inflow) == 1
+        model.addConstr(f_e.sum(i, '*') - f_e.sum('*', i) == 1, name=f"f_e_node_{i}")
 
-    # Block flow through cut edges (only for existing edges)
-    for (i, j) in f_e:
+    # Block flow through cut edges
+    for (i, j) in edge_indices:
         if i in non_terminal and j in non_terminal:
-            prob += f_e[(i, j)] <= (n - 1) * (1 - y[(i, j)])
+            #f_e[(i, j)] <= (n - 1) * (1 - y[(i, j)])
+            model.addConstr(f_e[i, j] <= M * (1 - y[i, j]), name=f"f_e_cap_{i}_{j}")
 
-    ##### Objective: Minimize total crossing weight for ALL possible pairs #####
-    #objective_terms = []
-    #for i in non_terminal:
-        #for j in non_terminal:
-            #if i != j:
-                #i_name = node_names[i]
-                #j_name = node_names[j]
-                #cost_val = W.get((i_name, j_name), 0)  # Get cost from W dict
-                #objective_terms.append(cost_val * y[(i, j)])
-    
-    #prob += pulp.lpSum(objective_terms)
-    prob += pulp.lpSum(W[node_names[i], node_names[j]] * y[(i, j)] for (i, j) in y)
+    # --- Objective ---
+    # Minimize total crossing cost for ALL possible pairs
+    objective_expr = gp.quicksum(W.get((node_names[i], node_names[j]), 0) * y[i, j] 
+                                for i, j in y_indices)
+    model.setObjective(objective_expr, GRB.MINIMIZE)
 
-    #print(f"Objective has {len(objective_terms)} terms")
+    # --- Solve ---
+    model.optimize()
+    Sigma_1 = []
+    Sigma_2 = []
+    total_cost = None
 
-    # Solve
-    prob.solve(pulp.GUROBI_CMD(msg=False))  # Enable messages for debugging
+    #  *any* solution was found, not just the optimal one
+    if model.SolCount > 0:
+        total_cost = model.ObjVal
 
-    # Check solution status
-    if prob.status != pulp.LpStatusOptimal:
-        print(f"ILP failed with status: {pulp.LpStatus[prob.status]}")
-        return (set(), set(), None, node_names)
+        Sigma_1 = [node_names[i] for i in non_terminal if x[i].X < 0.5]
+        Sigma_2 = [node_names[i] for i in non_terminal if x[i].X > 0.5]
+        
+        # Check for valid partition 
+        if not Sigma_1 or not Sigma_2:
+            print("Empty partition detected (should be prevented by constraints)")
+            total_cost = None # Treat as invalid
+        
+        # Warn if not proven optimal
+        if model.status != GRB.OPTIMAL:
+            print(f"Warning: Solution is feasible but not proven optimal. Status: {model.status}")
 
-    # Extract results
-    Sigma_1 = [node_names[i] for i in non_terminal if pulp.value(x[i]) == 0]
-    Sigma_2 = [node_names[i] for i in non_terminal if pulp.value(x[i]) == 1]
-    total_cost = pulp.value(prob.objective)
-    
-    print(f"Partition: Sigma_1={Sigma_1}, Sigma_2={Sigma_2}, cost={total_cost}")
-    
-    if not Sigma_1 or not Sigma_2:
-        print("Empty partition detected")
-        total_cost = None
+    #else:
+        # This block runs only if NO solution was found
+        #print(f"ILP failed to find any feasible solution. Status: {model.status}")
 
     return (
         extract_activities(Sigma_1),
@@ -125,4 +135,3 @@ def par_cut_ilp(G, sup=1.0):
         total_cost,
         node_names
     )
-

@@ -1,286 +1,188 @@
-import pulp
-from IM_ilp.Helper_Functions import preprocess_graph, cost_eventual, extract_activities
+import gurobipy as gp
+from gurobipy import GRB
+from IM_ilp_gurobi.Helper_Functions import preprocess_graph, cost_eventual, extract_activities
 import numpy as np
 
 def nx_to_mat_and_weights_seq(G, log, sup=1.0):
     nodes = list(G.nodes())
-    print("nodes? ")
     node_index = {node: i for i, node in enumerate(nodes)}
     n = len(nodes)
     A = np.zeros((n, n), dtype=float)
 
     W_backward = {}  # For deviating edges (actual weights)
-    print("maybe this one is the problem")
     for u, v, data in G.edges(data=True):
         i = node_index[u]
         j = node_index[v]
         A[i, j] = 1
-        W_backward[i, j] = data.get('weight', 0)  # Actual weights
-
+        W_backward[(i, j)] = data.get('weight', 0)  # Use index tuple (i, j) as key
+        
     W_forward = cost_eventual(G, log, sup)  # For missing edges (expected - actual)
 
     return A, W_forward, W_backward, nodes, node_index
 
+# if W_forward can be already cached.
+def get_backward_weights(G):
+    """
+    Helper to get only the Adjacency matrix and Backward weights.
+    This is much faster than running the full nx_to_mat_and_weights_seq.
+    """
+    nodes = list(G.nodes())
+    node_index = {node: i for i, node in enumerate(nodes)}
+    n = len(nodes)
+    A = np.zeros((n, n), dtype=float)
+    W_backward = {}
+    for u, v, data in G.edges(data=True):
+        if u in node_index and v in node_index:
+            i = node_index[u]
+            j = node_index[v]
+            A[i, j] = 1
+            W_backward[(i, j)] = data.get('weight', 0)
+    return A, W_backward, nodes, node_index
 
-def seq_cut_ilp_old(G,log,  sup=1.0):
+
+def seq_cut_ilp(G, log, sup=1.0, W_forward_cache=None):
+    
     start_node = 'start'
     end_node = 'end'
 
     # Preprocess graph
     reduced_graph, _, _ = preprocess_graph(G, start_node, end_node)
-    print("preprocesses")
-    A, W_forward, W_backward, node_names, node_index = nx_to_mat_and_weights_seq(reduced_graph, log, sup)
-    print("nx done")
-    n = A.shape[0]
 
+    W_forward = None
+    W_backward = None
+    
+    if W_forward_cache is not None:
+        # --- CACHE HIT (Fast Path) ---
+        # W_forward is provided, just get backward weights
+        A, W_backward, node_names, node_index = get_backward_weights(reduced_graph)
+        W_forward = W_forward_cache
+        n = A.shape[0]
+    else:
+        # --- CACHE MISS (Slow Path) ---
+        # Must calculate W_forward (cost_eventual) and W_backward
+        A, W_forward, W_backward, node_names, node_index = nx_to_mat_and_weights_seq(reduced_graph, log, sup)
+        n = A.shape[0]
+
+    if n == 0 or not node_names:
+        return set(), set(), None, []
+        
     start_idx = node_names.index(start_node)
     end_idx = node_names.index(end_node)
     non_terminal = [i for i in range(n) if i != start_idx and i != end_idx]
-    print("non terminal done")
+    
+    if not non_terminal:
+        # Graph only contains start/end nodes
+        return set(), set(), None, node_names
 
     # ILP Model
-    prob = pulp.LpProblem("Sequence_Cut_MinCost", pulp.LpMinimize)
+    model = gp.Model("Sequence_Cut_MinCost_Gurobi")
+    model.setParam('OutputFlag', 0)      # Suppress Gurobi console output
+    model.setParam('NonConvex', 2)       # Tell Gurobi to solve a non-convex quadratic model
+    model.setParam('Threads', 1)         # Control thread usage
 
-    # Variables
-    x = pulp.LpVariable.dicts("x", non_terminal, cat=pulp.LpBinary)
-    f1 = pulp.LpVariable.dicts("f1", [(i, j) for i in range(n) for j in range(n) if A[i, j]], lowBound=0,
-                               cat='Continuous')
-    f2 = pulp.LpVariable.dicts("f2", [(i, j) for i in range(n) for j in range(n) if A[i, j]], lowBound=0,
-                               cat='Continuous')
+    # --- Variables ---
+    
+    # x[i] = 1 if node i is in Sigma_2 (partition 2), 0 if in Sigma_1
+    x = model.addVars(non_terminal, vtype=GRB.BINARY, name="x")
+    
+    # Flow variables for Sigma_1 (partition 1)
+    f1_indices = [(i, j) for i in range(n) for j in range(n) if A[i, j]]
+    f1 = model.addVars(f1_indices, vtype=GRB.CONTINUOUS, name="f1")
+    
+    # Flow variables for Sigma_2 (partition 2)
+    f2_indices = [(i, j) for i in range(n) for j in range(n) if A[i, j]]
+    f2 = model.addVars(f2_indices, vtype=GRB.CONTINUOUS, name="f2")
 
-    cost_terms = []
-
-    # --- Objective: ONLY edges between Σ₁ and Σ₂ ---
-    for i in non_terminal:
-        i_name = node_names[i]
-        for j in non_terminal:
-            if A[i, j]:
-                j_name = node_names[j]
-
-                cost_val_fwd = W_forward.get((i_name, j_name), 0)
-                cost_val_bwd = W_backward.get((i_name, j_name), 0)
-
-                # Auxiliary binary variables
-                z_forward = pulp.LpVariable(f"z_fwd_{i}_{j}", cat=pulp.LpBinary)
-                z_backward = pulp.LpVariable(f"z_bwd_{i}_{j}", cat=pulp.LpBinary)
-
-                # Forward: i in Σ1, j in Σ2
-                prob += z_forward >= (1 - x[i]) + x[j] - 1
-                prob += z_forward <= (1 - x[i])
-                prob += z_forward <= x[j]
-                cost_terms.append(cost_val_fwd * z_forward)
-
-                # Backward: i in Σ2, j in Σ1
-                prob += z_backward >= x[i] + (1 - x[j]) - 1
-                prob += z_backward <= x[i]
-                prob += z_backward <= (1 - x[j])
-                cost_terms.append(cost_val_bwd * z_backward)
-            
-
-    # Objective
-    prob += pulp.lpSum(cost_terms)
-
-    # Constraints
-    # Non-trivial partition
-    prob += pulp.lpSum(1 - x[i] for i in non_terminal) >= 1
-    prob += pulp.lpSum(x[i] for i in non_terminal) >= 1
-
-    # Flow constraints (Sigma_1)
-    prob += pulp.lpSum(f1[(start_idx, j)] for j in range(n) if A[start_idx, j]) == pulp.lpSum(
-        1 - x[u] for u in non_terminal)
-    for u in non_terminal:
-        inflow = pulp.lpSum(f1[(i, u)] for i in range(n) if A[i, u])
-        outflow = pulp.lpSum(f1[(u, j)] for j in range(n) if A[u, j])
-        prob += (inflow - outflow) == (1 - x[u])
-    for i, j in f1:
-        if i != start_idx:
-            prob += f1[(i, j)] <= (n * n) * (1 - x.get(i, 0))
-        if j != end_idx:
-            prob += f1[(i, j)] <= (n * n) * (1 - x.get(j, 0))
-
-    # Flow constraints (Sigma_2)
-    prob += pulp.lpSum(f2[(i, end_idx)] for i in range(n) if A[i, end_idx]) == pulp.lpSum(x[u] for u in non_terminal)
-    for u in non_terminal:
-        inflow = pulp.LpAffineExpression([(f2[(i, u)], 1) for i in range(n) if A[i, u]])
-        outflow = pulp.LpAffineExpression([(f2[(u, j)], 1) for j in range(n) if A[u, j]])
-        prob += (outflow - inflow) == x[u]
-    for i, j in f2:
-        if i != start_idx:
-            prob += f2[(i, j)] <= (n * n) * x.get(i, 1)
-        if j != end_idx:
-            prob += f2[(i, j)] <= (n * n) * x.get(j, 1)
-
-    # Solve
-    status = prob.solve(pulp.GUROBI_CMD(msg=False))
-    # print(f"Solver status: {pulp.LpStatus[status]}")
-
-    # Manual cost calculation
-    total_cost = 0
-
-    # Non-terminal edges
-    for i in non_terminal:
-        for j in non_terminal:
-            if A[i, j]:
-                i_val = pulp.value(x[i])
-                j_val = pulp.value(x[j])
-                i_name = node_names[i]
-                j_name = node_names[j]
-
-                if i_val < 0.5 and j_val > 0.5:  # Forward
-                    cost_val = W_forward.get((i_name, j_name), 0)
-                    total_cost += cost_val
-                    # print(f"Forward: {i_name} -> {j_name}: cost = {cost_val}")
-                elif i_val > 0.5 and j_val < 0.5:  # Backward
-                    cost_val = W_backward.get((i_name, j_name), 0)
-                    total_cost += cost_val
-                    # print(f"Backward: {i_name} -> {j_name}: cost = {cost_val}")
-
-    # print(f"Total calculated cost: {total_cost}")
-
-    # Extract results
-    Sigma_1 = [node_names[i] for i in non_terminal if pulp.value(x[i]) == 0]
-    Sigma_2 = [node_names[i] for i in non_terminal if pulp.value(x[i]) == 1]
-
-    if not Sigma_1 and not Sigma_2:
-        total_cost = None
-
-    return (
-        extract_activities(Sigma_1),
-        extract_activities(Sigma_2),
-        total_cost,
-        node_names
-    )
-
-def seq_cut_ilp(G, log, sup=1.0):
-    start_node = 'start'
-    end_node = 'end'
-
-    # Preprocess graph
-    reduced_graph, _, _ = preprocess_graph(G, start_node, end_node)
-    A, W_forward, W_backward, node_names, node_index = nx_to_mat_and_weights_seq(reduced_graph, log, sup)
-    n = A.shape[0]
-
-    start_idx = node_names.index(start_node)
-    end_idx = node_names.index(end_node)
-    non_terminal = [i for i in range(n) if i != start_idx and i != end_idx]
-
-    # ILP Model
-    prob = pulp.LpProblem("Sequence_Cut_MinCost", pulp.LpMinimize)
-
-    # Variables
-    x = pulp.LpVariable.dicts("x", non_terminal, cat=pulp.LpBinary)
-    f1 = pulp.LpVariable.dicts("f1", [(i, j) for i in range(n) for j in range(n) if A[i, j]], lowBound=0,
-                               cat='Continuous')
-    f2 = pulp.LpVariable.dicts("f2", [(i, j) for i in range(n) for j in range(n) if A[i, j]], lowBound=0,
-                               cat='Continuous')
-
-    cost_terms = []
-
-    # --- FORWARD COST: All possible edges from Σ₁ to Σ₂ ---
+    
+    # Objective 
+    
+    # FORWARD COST: All possible eventual-follows edges from Σ₁ to Σ₂
+    #    cost * (1 - x[i]) * x[j]
+    forward_cost_terms = []
     for i in non_terminal:
         i_name = node_names[i]
         for j in non_terminal:
             if i == j:
                 continue
-                
             j_name = node_names[j]
-            
-            # Get forward cost (expected - actual for eventual-follows)
             cost_val_fwd = W_forward.get((i_name, j_name), 0)
-            
-            # Only add cost if i in Σ₁ AND j in Σ₂
-            z_forward = pulp.LpVariable(f"z_fwd_{i}_{j}", cat=pulp.LpBinary)
-            
-            # z_forward = 1 iff (1-x[i]) = 1 AND x[j] = 1
-            prob += z_forward >= (1 - x[i]) + x[j] - 1
-            prob += z_forward <= (1 - x[i])
-            prob += z_forward <= x[j]
-            
-            cost_terms.append(cost_val_fwd * z_forward)
+            if cost_val_fwd > 0:
+                forward_cost_terms.append(cost_val_fwd * (1 - x[i]) * x[j])
 
-    # --- BACKWARD COST: Only actual edges from Σ₂ to Σ₁ ---
+    # BACKWARD COST: Only actual directly-follows edges from Σ₂ to Σ₁
+    #    cost * x[i] * (1 - x[j])
+    backward_cost_terms = []
     for i in non_terminal:
-        i_name = node_names[i]
         for j in non_terminal:
             if A[i, j]:  # Only if edge actually exists
-                j_name = node_names[j]
-                
-                # Get backward cost (actual weight of deviating edge)
                 cost_val_bwd = W_backward.get((i, j), 0)
-                
-                # Only add cost if i in Σ₂ AND j in Σ₁
-                z_backward = pulp.LpVariable(f"z_bwd_{i}_{j}", cat=pulp.LpBinary)
-                
-                # z_backward = 1 iff x[i] = 1 AND (1-x[j]) = 1
-                prob += z_backward >= x[i] + (1 - x[j]) - 1
-                prob += z_backward <= x[i]
-                prob += z_backward <= (1 - x[j])
-                
-                cost_terms.append(cost_val_bwd * z_backward)
+                if cost_val_bwd > 0:
+                    backward_cost_terms.append(cost_val_bwd * x[i] * (1 - x[j]))
 
-    # Objective
-    prob += pulp.lpSum(cost_terms)
+    # combined quadratic objective
+    model.setObjective(gp.quicksum(forward_cost_terms) + gp.quicksum(backward_cost_terms), GRB.MINIMIZE)
 
-    # Constraints (same as before)
+    
+    # --- Constraints ---
+    
     # Non-trivial partition
-    prob += pulp.lpSum(1 - x[i] for i in non_terminal) >= 1
-    prob += pulp.lpSum(x[i] for i in non_terminal) >= 1
+    model.addConstr(gp.quicksum(1 - x[i] for i in non_terminal) >= 1, name="non_trivial_1")
+    model.addConstr(gp.quicksum(x[i] for i in non_terminal) >= 1, name="non_trivial_2")
 
-    # Flow constraints (Sigma_1)
-    prob += pulp.lpSum(f1[(start_idx, j)] for j in range(n) if A[start_idx, j]) == pulp.lpSum(
-        1 - x[u] for u in non_terminal)
+    # Sigma_1
+    model.addConstr(f1.sum(start_idx, '*') == gp.quicksum(1 - x[u] for u in non_terminal), name="flow1_start")
+    
     for u in non_terminal:
-        inflow = pulp.lpSum(f1[(i, u)] for i in range(n) if A[i, u])
-        outflow = pulp.lpSum(f1[(u, j)] for j in range(n) if A[u, j])
-        prob += (inflow - outflow) == (1 - x[u])
-    for i, j in f1:
-        if i != start_idx:
-            prob += f1[(i, j)] <= (n * n) * (1 - x.get(i, 0))
-        if j != end_idx:
-            prob += f1[(i, j)] <= (n * n) * (1 - x.get(j, 0))
+        inflow = f1.sum('*', u)
+        outflow = f1.sum(u, '*')
+        model.addConstr((inflow - outflow) == (1 - x[u]), name=f"flow1_node_{u}")
 
-    # Flow constraints (Sigma_2)
-    prob += pulp.lpSum(f2[(i, end_idx)] for i in range(n) if A[i, end_idx]) == pulp.lpSum(x[u] for u in non_terminal)
+    # Replicating PuLP's `x.get(i, 0)` logic
+    for i, j in f1_indices:
+        if i != start_idx:
+            # x_i_term = x[i] if i is non_terminal, else 0 (if i=end_idx)
+            x_i_term = x[i] if i in non_terminal else 0
+            model.addConstr(f1[i, j] <= (n * n) * (1 - x_i_term), name=f"flow1_cap_i_{i}_{j}")
+        if j != end_idx:
+            # x_j_term = x[j] if j is non_terminal, else 0 (if j=start_idx)
+            x_j_term = x[j] if j in non_terminal else 0
+            model.addConstr(f1[i, j] <= (n * n) * (1 - x_j_term), name=f"flow1_cap_j_{i}_{j}")
+
+    # sigma_2
+    model.addConstr(f2.sum('*', end_idx) == gp.quicksum(x[u] for u in non_terminal), name="flow2_end")
+    
     for u in non_terminal:
-        inflow = pulp.LpAffineExpression([(f2[(i, u)], 1) for i in range(n) if A[i, u]])
-        outflow = pulp.LpAffineExpression([(f2[(u, j)], 1) for j in range(n) if A[u, j]])
-        prob += (outflow - inflow) == x[u]
-    for i, j in f2:
+        inflow = f2.sum('*', u)
+        outflow = f2.sum(u, '*')
+        model.addConstr((outflow - inflow) == x[u], name=f"flow2_node_{u}")
+    
+    # `x.get(i, 1)` logic
+    for i, j in f2_indices:
         if i != start_idx:
-            prob += f2[(i, j)] <= (n * n) * x.get(i, 1)
+            # x_i_term = x[i] if i is non_terminal, else 1 (if i=end_idx)
+            x_i_term = x[i] if i in non_terminal else 1
+            model.addConstr(f2[i, j] <= (n * n) * x_i_term, name=f"flow2_cap_i_{i}_{j}")
         if j != end_idx:
-            prob += f2[(i, j)] <= (n * n) * x.get(j, 1)
+            # x_j_term = x[j] if j is non_terminal, else 1 (if j=start_idx)
+            x_j_term = x[j] if j in non_terminal else 1
+            model.addConstr(f2[i, j] <= (n * n) * x_j_term, name=f"flow2_cap_j_{i}_{j}")
 
-    # Solve
-    status = prob.solve(pulp.GUROBI_CMD(msg=False))
+    # Solve 
+    model.optimize()
 
-    # Extract results and calculate actual cost
-    Sigma_1 = [node_names[i] for i in non_terminal if pulp.value(x[i]) == 0]
-    Sigma_2 = [node_names[i] for i in non_terminal if pulp.value(x[i]) == 1]
+    # results 
+    if model.Status == GRB.OPTIMAL:
+        Sigma_1 = [node_names[i] for i in non_terminal if x[i].X < 0.5]
+        Sigma_2 = [node_names[i] for i in non_terminal if x[i].X > 0.5]
+        total_cost = model.ObjVal
 
-    # Calculate actual cost manually
-    total_cost = 0
-
-    # Forward cost: all possible edges from Σ₁ to Σ₂
-    for i in non_terminal:
-        if pulp.value(x[i]) == 0:  # i in Σ₁
-            i_name = node_names[i]
-            for j in non_terminal:
-                if pulp.value(x[j]) == 1:  # j in Σ₂
-                    j_name = node_names[j]
-                    cost_val = W_forward.get((i_name, j_name), 0)
-                    total_cost += cost_val
-
-    # Backward cost: only actual edges from Σ₂ to Σ₁
-    for i in non_terminal:
-        if pulp.value(x[i]) == 1:  # i in Σ₂
-            for j in non_terminal:
-                if pulp.value(x[j]) == 0 and A[i, j]:  # j in Σ₁ AND edge exists
-                    cost_val = W_backward.get((i, j), 0)
-                    total_cost += cost_val
-
-    if not Sigma_1 and not Sigma_2:
-        total_cost = None
+        # partitions are valid 
+        if not Sigma_1 or not Sigma_2:
+            total_cost = None
+    else:
+        # failed
+        print(f"Gurobi solver for seq_cut failed with status: {model.Status}")
+        Sigma_1, Sigma_2, total_cost = set(), set(), None
 
     return (
         extract_activities(Sigma_1),
@@ -288,3 +190,4 @@ def seq_cut_ilp(G, log, sup=1.0):
         total_cost,
         node_names
     )
+
