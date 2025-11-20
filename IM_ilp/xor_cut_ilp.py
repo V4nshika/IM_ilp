@@ -117,25 +117,31 @@ def xor_cut_ilp(G, sup=1.0):
     Sigma_2 = []
     total_cost = None
 
-    if model.Status == GRB.OPTIMAL:
+    if model.SolCount > 0:
         total_cost = model.ObjVal
-        for i in non_terminal:
-            if x[i].X < 0.5:
-                Sigma_1.append(node_names[i])
-            else:
-                Sigma_2.append(node_names[i])
-  
+
+        Sigma_1 = [node_names[i] for i in non_terminal if x[i].X < 0.5]
+        Sigma_2 = [node_names[i] for i in non_terminal if x[i].X > 0.5]
+        
+        # Check for valid partition 
+        if not Sigma_1 or not Sigma_2:
+            print("Empty partition detected (should be prevented by constraints)")
+            total_cost = None # Treat as invalid
+        
+        # Warn if not proven optimal
+        if model.status != GRB.OPTIMAL:
+            print(f"Warning: Solution is feasible but not proven optimal. Status: {model.status}")
+
     #else:
-        #print(f"XOR cut ILP failed to find an optimal solution. Status: {model.Status}")
-    if not Sigma_1 and not Sigma_2 and non_terminal:
-        total_cost = None
+        # This block runs only if NO solution was found
+        #print(f"ILP failed to find any feasible solution. Status: {model.status}")
 
     return (
         extract_activities(Sigma_1),
         extract_activities(Sigma_2),
         total_cost,
         node_names
-        )        
+    )       
 
 
 def xor_cut_tau(G, sup=1.0):
