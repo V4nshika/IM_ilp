@@ -1,7 +1,6 @@
+import IM_ilp.split as split
 from collections import Counter
-# Import 'cost_eventual' to be used for caching
 from IM_ilp.Helper_Functions import log_to_graph, _convert_log_to_counter, cost_eventual
-import prolysis.discovery.split_functions.split as split
 from IM_ilp.seq_cut_ilp import seq_cut_ilp
 from IM_ilp.xor_cut_ilp import xor_cut_ilp, xor_cut_tau
 from IM_ilp.par_cut_ilp import par_cut_ilp
@@ -41,7 +40,7 @@ def _create_exclusive_choice_over_traces_simple(log_counter):
     children = []
     for trace in log_counter:
         if len(trace) == 0:
-            children.append(ProcessTreeNode(activity="tau"))
+            children.append(ProcessTreeNode(activity=None))
         else:
             unique_activities = set(trace)
             if len(unique_activities) == 1:
@@ -82,7 +81,10 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
     if debug:
         print(f"\n=== Recursion Depth {depth} ===")
 
-    log_counter = _convert_log_to_counter(log)
+    if not isinstance(log, Counter):
+        log_counter = _convert_log_to_counter(log)
+    else:
+        log_counter = log
 
     if debug:
         print(f"Log has {sum(log_counter.values())} total trace occurrences")
@@ -94,7 +96,7 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
     if not log_counter:
         if debug:
             print("Empty log detected, returning tau")
-        return ProcessTreeNode(activity="tau")
+        return ProcessTreeNode(activity=None)
 
     all_activities = _get_all_activities_from_counter(log_counter)
     if debug:
@@ -104,7 +106,7 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
     if len(all_activities) == 0:
         if debug:
             print("Base case: Only empty traces detected, returning tau")
-        return ProcessTreeNode(activity="tau")
+        return ProcessTreeNode(activity=None)
 
     # IMbi BASE CASE 2: If all traces have only one activity (|Σ| ≤ 1)
     if len(all_activities) == 1:
@@ -140,11 +142,11 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
                 # Pass the cache down
                 child = recursion_full(non_empty_log, w_forward_cache, depth + 1, max_depth, sup, debug=debug, parent_was_tau=True)
                 return ProcessTreeNode(operator='exc', children=[
-                    ProcessTreeNode(activity="tau"),
+                    ProcessTreeNode(activity=None),
                     child
                 ])
             else:
-                return ProcessTreeNode(activity="tau")
+                return ProcessTreeNode(activity=None)
 
         total_events = 0
         self_loop_count = 0
@@ -173,7 +175,7 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
                 print("τ-loop condition satisfied, creating loop structure")
             return ProcessTreeNode(operator='loop', children=[
                 ProcessTreeNode(activity=activity),
-                ProcessTreeNode(activity="tau")
+                ProcessTreeNode(activity=None)
             ])
 
         if debug:
@@ -201,7 +203,7 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
             print("Calculating W_forward_cache (eventual-follows) for this subgraph...")
         # Note: This passes 'log', which is the original log object,
         # not 'log_counter'. cost_eventual is built to handle this.
-        w_forward_cache = cost_eventual(G, log, sup) 
+        w_forward_cache = cost_eventual(G, log_counter, sup) 
         if debug:
             print("... W_forward_cache calculation complete.")
     # --- End Caching Logic ---
@@ -217,8 +219,8 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
 
     # Define all possible cut functions
     all_cut_functions = [
-        ('exc', xor_cut_ilp),
         ('seq', seq_cut_ilp),
+        ('exc', xor_cut_ilp),
         ('par', par_cut_ilp),
         ('loop', loop_cut_ilp),
         ('exc_tau', xor_cut_tau),
@@ -351,7 +353,16 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
                 log1_counter, log2_counter = split.split(current_op, [start_activities, end_activities], log_counter)
             else:
                 log1_counter, log2_counter = split.split(current_op, [best_Sigma_1, best_Sigma_2], log_counter)
-
+            # After the split operation, add this:
+            if debug:
+                print("DEBUG - Checking split results:")
+                print(f"Original activities: {all_activities}")
+                print(f"Sigma_1: {best_Sigma_1}")
+                print(f"Sigma_2: {best_Sigma_2}")
+                print(f"Log1 activities: {_get_all_activities_from_counter(log1_counter)}")
+                print(f"Log2 activities: {_get_all_activities_from_counter(log2_counter)}")
+                print(f"Log1 sample traces: {list(log1_counter.keys())[:3]}")
+                print(f"Log2 sample traces: {list(log2_counter.keys())[:3]}")
             # 3. Check for a failed tau split (no change in log)
             is_tau_cut = current_op in ['loop_tau', 'exc_tau']
             # Split fails if log2 is empty (no split) or log1 is unchanged (failing split)
@@ -389,7 +400,14 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
             child1 = recursion_full(log1_counter, w_forward_cache, depth + 1, max_depth, sup, debug=debug, parent_was_tau=current_op_is_tau)
             child2 = recursion_full(log2_counter, w_forward_cache, depth + 1, max_depth, sup, debug=debug, parent_was_tau=current_op_is_tau)
 
-            return ProcessTreeNode(operator=current_op, children=[child1, child2])
+            # Map tau cuts to standard operators
+            if current_op in ['exc_tau', 'loop_tau']:
+                standard_op = current_op.replace('_tau', '')
+                if debug:
+                    print(f"Converting tau cut {current_op} to standard operator {standard_op}")
+                return ProcessTreeNode(operator=standard_op, children=[child1, child2])
+            else:
+                return ProcessTreeNode(operator=current_op, children=[child1, child2])
 
         except Exception as e:
             if debug:
@@ -456,16 +474,14 @@ def to_pm4py_tree(node, parent=None):
     tree = ProcessTree()
     tree.parent = parent
 
-    if node.activity:
+    if node.activity is not None:
         tree.label = node.activity
     else:
         op_map = {
             'seq': Operator.SEQUENCE,
             'exc': Operator.XOR,
             'par': Operator.PARALLEL,
-            'loop': Operator.LOOP,
-            'exc_tau': Operator.XOR,   
-            'loop_tau': Operator.LOOP
+            'loop': Operator.LOOP
         }
         tree.operator = op_map.get(node.operator, None)
         for child in node.children:

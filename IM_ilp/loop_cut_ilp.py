@@ -362,6 +362,9 @@ def loop_cut_ilp(G, sup=1.0, debug=False):
         print("Warning: Reduced graph is empty after preprocessing.")
         return []
 
+    if nx.is_directed_acyclic_graph(reduced_graph):
+        return set(), set(), None, list(reduced_graph.nodes())
+
     A, W, nodes, node_index = nx_to_mat_and_weights_loop(reduced_graph)
     n = A.shape[0]
 
