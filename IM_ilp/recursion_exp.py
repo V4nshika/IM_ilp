@@ -463,7 +463,9 @@ def to_pm4py_tree(node, parent=None):
             'seq': Operator.SEQUENCE,
             'exc': Operator.XOR,
             'par': Operator.PARALLEL,
-            'loop': Operator.LOOP
+            'loop': Operator.LOOP,
+            'exc_tau': Operator.XOR,   
+            'loop_tau': Operator.LOOP
         }
         tree.operator = op_map.get(node.operator, None)
         for child in node.children:
