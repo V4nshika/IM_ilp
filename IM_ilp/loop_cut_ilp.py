@@ -1,3 +1,4 @@
+import networkx as nx
 import gurobipy as gp
 from gurobipy import GRB
 from IM_ilp.Helper_Functions import preprocess_graph, extract_activities, log_to_graph
