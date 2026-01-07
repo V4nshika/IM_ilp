@@ -1,6 +1,6 @@
 import gurobipy as gp
 from gurobipy import GRB
-from IM_ilp_gurobi.Helper_Functions import preprocess_graph, extract_activities
+from IM_ilp.Helper_Functions import preprocess_graph, extract_activities
 import numpy as np
 
 # This helper function has no PuLP code and remains unchanged.
