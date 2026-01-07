@@ -1,6 +1,6 @@
 import gurobipy as gp
 from gurobipy import GRB
-from IM_ilp.Helper_Functions import preprocess_graph, extract_activities
+from IM_ilp_gurobi.Helper_Functions import preprocess_graph, extract_activities
 import numpy as np
 
 # This helper function has no PuLP code and remains unchanged.
@@ -11,7 +11,7 @@ def nx_to_mat_and_weights_xor(G):
     A = np.zeros((n, n), dtype=int)
     W = np.zeros((n, n), dtype=float)
     for u, v, data in G.edges(data=True):
-        # check for robustness 
+        # Added check for robustness (from your V2)
         if u not in node_index or v not in node_index:
             continue
         i = node_index[u]
@@ -20,18 +20,18 @@ def nx_to_mat_and_weights_xor(G):
         W[i, j] = data.get('weight', 1.0)
     return A, W, nodes, node_index
 
-# gurobi
+
 def xor_cut_ilp(G, sup=1.0):
 
     start_node = 'start'
     end_node = 'end'
 
-    # Preprocess graph 
+    # Preprocess graph (no change)
     reduced_graph, _, _ = preprocess_graph(G, start_node, end_node)
     A, W, node_names, node_index = nx_to_mat_and_weights_xor(reduced_graph)
     n = A.shape[0]
 
-    # --- Robustness checks  ---
+    # --- Robustness checks (good practice, from your V2) ---
     if n == 0 or not node_names:
         return set(), set(), None, []
         
@@ -48,22 +48,23 @@ def xor_cut_ilp(G, sup=1.0):
     model = gp.Model("XOR_MinCut_Flow_Corrected")
     model.setParam('OutputFlag', 0) # Suppress Gurobi output
 
-    # 1. variable indices
+
+    # 1. Define variable indices
     edge_indices = [(i, j) for i in range(n) for j in range(n) if A[i, j]]
 
-    # 2.  variables (matching PuLP V1)
+    # 2. Add variables (matching PuLP V1)
     # x[i] = 1 if node i is in Sigma_2, 0 if in Sigma_1
     x = model.addVars(non_terminal, vtype=GRB.BINARY, name="x")
     
     # y[i,j] = 1 if edge (i,j) is cut
     y = model.addVars(edge_indices, vtype=GRB.BINARY, name="y")
     
-    # Flow variables from start 
+    # Flow variables from start (matching PuLP's Integer cat)
     f_s = model.addVars(edge_indices, lb=0, vtype=GRB.INTEGER, name="f_s")
-    # Flow variables to end 
+    # Flow variables to end (matching PuLP's Integer cat)
     f_e = model.addVars(edge_indices, lb=0, vtype=GRB.INTEGER, name="f_e")
 
-    ### 3. constraints (matching PuLP V1 logic) ###
+    # 3. Add Constraints 
 
     # Don't cut start -> * or * -> end edges
     for i, j in edge_indices:
@@ -77,6 +78,7 @@ def xor_cut_ilp(G, sup=1.0):
     model.addConstr(gp.quicksum(x[i] for i in non_terminal) >= 1)
     model.addConstr(gp.quicksum(1 - x[i] for i in non_terminal) >= 1)
 
+    # Big M value (same as PuLP's n-1)
     M = n - 1
 
     # --- reachability FROM start (f_s) ---
@@ -85,11 +87,11 @@ def xor_cut_ilp(G, sup=1.0):
     for i in range(n):
         if i == start_idx:
             continue
-        # (inflow - outflow) == 1
+        # PuLP: (inflow - outflow) == 1
         model.addConstr(f_s.sum('*', i) - f_s.sum(i, '*') == 1, name=f"f_s_node_{i}")
 
     for (i, j) in edge_indices:
-        # f_s[(i, j)] <= (n - 1) * (1 - y[(i, j)])
+        # PuLP: f_s[(i, j)] <= (n - 1) * (1 - y[(i, j)])
         model.addConstr(f_s[i, j] <= M * (1 - y[i, j]), name=f"f_s_cap_{i}_{j}")
 
     # --- reachability TO end (f_e) ---
@@ -98,21 +100,21 @@ def xor_cut_ilp(G, sup=1.0):
     for i in range(n):
         if i == end_idx:
             continue
-        #(outflow - inflow) == 1
+        # PuLP: (outflow - inflow) == 1
         model.addConstr(f_e.sum(i, '*') - f_e.sum('*', i) == 1, name=f"f_e_node_{i}")
 
     for (i, j) in edge_indices:
-        # f_e[(i, j)] <= (n - 1) * (1 - y[(i, j)])
+        # PuLP: f_e[(i, j)] <= (n - 1) * (1 - y[(i, j)])
         model.addConstr(f_e[i, j] <= M * (1 - y[i, j]), name=f"f_e_cap_{i}_{j}")
 
-    # 4. objective
+    # 4. Set objective
     objective = gp.quicksum(W[i, j] * y[i, j] for i, j in edge_indices)
     model.setObjective(objective, GRB.MINIMIZE)
 
-    # 5. solve
+    # 5. Solve
     model.optimize()
 
-    # 6. results
+    # 6. Extract results
     Sigma_1 = []
     Sigma_2 = []
     total_cost = None
@@ -123,12 +125,10 @@ def xor_cut_ilp(G, sup=1.0):
         Sigma_1 = [node_names[i] for i in non_terminal if x[i].X < 0.5]
         Sigma_2 = [node_names[i] for i in non_terminal if x[i].X > 0.5]
         
-        # Check for valid partition 
         if not Sigma_1 or not Sigma_2:
             print("Empty partition detected (should be prevented by constraints)")
             total_cost = None # Treat as invalid
         
-        # Warn if not proven optimal
         if model.status != GRB.OPTIMAL:
             print(f"Warning: Solution is feasible but not proven optimal. Status: {model.status}")
 
@@ -141,9 +141,9 @@ def xor_cut_ilp(G, sup=1.0):
         extract_activities(Sigma_2),
         total_cost,
         node_names
-    )       
+    )        
 
-
+# This function is identical to both V1 and V2
 def xor_cut_tau(G, sup=1.0):
     total_cases = sum(data["weight"] for src, tgt, data in G.edges(data=True) if src == "start")
     start_to_end_weight = G.get_edge_data('start', 'end', {'weight': 0})['weight']
@@ -153,4 +153,4 @@ def xor_cut_tau(G, sup=1.0):
     Sigma_1 = extract_activities(nodes)  # All regular activities
     Sigma_2 = set()  # Represents tau/empty
 
-    return Sigma_1, Sigma_2, total_cost, nodes
+    return total_cost
