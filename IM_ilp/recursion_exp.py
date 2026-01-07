@@ -1,17 +1,15 @@
-import IM_ilp.split as split
+import IM_ilp_gurobi.split as split
+# from prolysis.discovery.split_functions import split
 from collections import Counter
-from IM_ilp.Helper_Functions import log_to_graph, _convert_log_to_counter, cost_eventual
-from IM_ilp.seq_cut_ilp import seq_cut_ilp
+from IM_ilp.Helper_Functions import log_to_graph, _convert_log_to_counter, generate_nx_indirect_graph
+from IM_ilp.seq_cut_ilp import seq_cut_ilp_linearized as seq_cut_ilp
 from IM_ilp.xor_cut_ilp import xor_cut_ilp, xor_cut_tau
 from IM_ilp.par_cut_ilp import par_cut_ilp
 from IM_ilp.loop_cut_ilp import loop_cut_ilp, loop_cut_tau
-from pm4py.objects.process_tree.obj import ProcessTree
-from pm4py.objects.process_tree.utils import generic
-from pm4py.objects.process_tree.obj import Operator
 
 
 class ProcessTreeNode:
-    """Class to represent a process tree node"""
+
     def __init__(self, operator=None, children=None, activity=None):
         self.operator = operator
         self.children = children if children is not None else []
@@ -35,47 +33,128 @@ class ProcessTreeNode:
             return f"({self.operator}, {children_repr})"
 
 
-def _create_exclusive_choice_over_traces_simple(log_counter):
-    """Simple fallback that prevents duplicate activities by using exclusive choice"""
-    children = []
+def _get_all_activities_from_counter(log_counter):
+    """Extract all unique activities from a Counter log"""
+    all_activities = set()
     for trace in log_counter:
-        if len(trace) == 0:
-            children.append(ProcessTreeNode(activity=None))
-        else:
-            unique_activities = set(trace)
-            if len(unique_activities) == 1:
-                children.append(ProcessTreeNode(activity=next(iter(unique_activities))))
+        all_activities.update(trace)
+    return all_activities
+
+
+def extract_activities_from_nodes(nodes):
+    """Extract activity names from node list, excluding 'start' and 'end'"""
+    return {node for node in nodes if node not in ['start', 'end']}
+
+
+def get_start_end_activities(G):
+    """Get start and end activities from graph"""
+    start_activities = {tgt for src, tgt in G.out_edges('start') if tgt != 'end'}
+    end_activities = {src for src, tgt in G.in_edges('end') if src != 'start'}
+    return start_activities, end_activities
+
+
+def n_edges(G, source_set, target_set):
+    """
+    Sum of weights of edges going from any node in source_set to any node in target_set.
+    """
+    weight = 0
+    for u in source_set:
+        if u in G:
+            for v in target_set:
+                if v in G and G.has_edge(u, v):
+                    weight += G[u][v].get('weight', 0)
+    return weight
+
+
+def check_loop_tau(G_indirect, start_activities, end_activities):
+    """
+    Checks if Loop Tau is structurally allowed.
+    STRICT MODE:
+    1. Must have back-edges from End -> Start.
+    2. ALL start activities must have a self-loop (x,x).
+    """
+    # 1. Check for back-edge flow (End -> Start)
+    weight_end_to_start = n_edges(G_indirect, end_activities, start_activities)
+
+    if weight_end_to_start <= 0:
+        return False
+
+    # 2. Check strict self-loop condition (ALL must exist)
+    for act in start_activities:
+        if not G_indirect.has_edge(act, act):
+            # If any start activity is missing a self-loop, reject the cut.
+            return False
+
+    return True
+
+
+def calculate_exc_tau_cost_v2(G, sup):
+    """
+    mis = max(0, sup * sum_out_degree(start) - weight(start->end))
+    """
+    total_start_out_weight = sum(data['weight'] for _, _, data in G.out_edges('start', data=True))
+
+    # Calculate get_edge_weight(start, end)
+    start_to_end_weight = 0
+    if G.has_edge('start', 'end'):
+        start_to_end_weight = G['start']['end'].get('weight', 0)
+
+    # Formula: mis = max(0, sup * start_sum - start_end_weight)
+    mis = max(0, sup * total_start_out_weight - start_to_end_weight)
+
+    return mis
+
+
+def calculate_loop_tau_cost_v2(G, sup, start_acts, end_acts):
+    # M_P: Total weight of edges going from End Activities -> Start Activities
+    M_P = n_edges(G, end_acts, start_acts)
+
+    # start_sum: Total weight from Global Start -> Start Activities
+    start_sum = n_edges(G, {'start'}, start_acts)
+
+    # end_sum: Total weight from End Activities -> Global End
+    end_sum = n_edges(G, end_acts, {'end'})
+
+    mis_cost = 0.0
+
+    # Avoid division by zero
+    if start_sum == 0 or end_sum == 0:
+        return float('inf')
+
+        # Iterate over all pairs (a, b) where a in Start_Acts and b in End_Acts
+    for a in start_acts:
+        for b in end_acts:
+            # Weight from Start -> a
+            w_start_a = 0
+            if G.has_edge('start', a):
+                w_start_a = G['start'][a].get('weight', 0)
+
+            # Weight from b -> End
+            w_b_end = 0
+            if G.has_edge(b, 'end'):
+                w_b_end = G[b]['end'].get('weight', 0)
+
+            # Actual weight of back-edge b -> a
+            w_b_a = 0
+            if G.has_edge(b, a):
+                w_b_a = G[b][a].get('weight', 0)
+
+            # Expected flow calculation from V1 logic
+            if w_b_a > 0:
+                # If edge exists, V1 logic sums deviations
+                expected_flow = M_P * sup * (w_start_a / start_sum) * (w_b_end / end_sum)
+                mis_cost += max(0, expected_flow - w_b_a)
             else:
-                # Fallback: just take the first activity to represent the trace
-                children.append(ProcessTreeNode(activity=next(iter(unique_activities))))
+                # If edge missing, pure penalty
+                expected_flow = M_P * sup * (w_start_a / start_sum) * (w_b_end / end_sum)
+                mis_cost += expected_flow
 
-    # Remove duplicates in children
-    unique_children = {}
-    for child in children:
-        key = child.activity
-        if key not in unique_children:
-            unique_children[key] = child
+    return mis_cost
 
-    children_list = list(unique_children.values())
 
-    if len(children_list) == 1:
-        return children_list[0]
-    else:
-        return ProcessTreeNode(operator='exc', children=children_list)
-
-# Add w_forward_cache=None to the function signature
-def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, debug=False, parent_was_tau=False):
+def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_threshold=0):
     """
     Recursively discovers a process tree from an event log.
-
-    :param log: Event log (Counter, list of tuples, or PM4Py EventLog)
-    :param w_forward_cache: A pre-calculated eventual-follows cost map (for 'seq' cut)
-    :param depth: Current recursion depth
-    :param max_depth: Maximum recursion depth
-    :param sup: Support threshold
-    :param debug: Print debug information
-    :param parent_was_tau: Flag to indicate if the parent call used a tau cut
-    :return: A ProcessTreeNode
     """
 
     if debug:
@@ -89,9 +168,6 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
     if debug:
         print(f"Log has {sum(log_counter.values())} total trace occurrences")
         print(f"Log has {len(log_counter)} unique traces")
-        if log_counter:
-            sample_traces = list(log_counter.keys())[:3]
-            print(f"Sample traces: {sample_traces}")
 
     if not log_counter:
         if debug:
@@ -102,151 +178,169 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
     if debug:
         print(f"Unique activities: {all_activities}")
 
-    # IMbi BASE CASE 1: If event log has only empty traces (|Σ| = 0)
+    # BASE CASE: If event log has only empty traces
     if len(all_activities) == 0:
         if debug:
             print("Base case: Only empty traces detected, returning tau")
         return ProcessTreeNode(activity=None)
 
-    # IMbi BASE CASE 2: If all traces have only one activity (|Σ| ≤ 1)
-    if len(all_activities) == 1:
-        activity = next(iter(all_activities))
-        if debug:
-            print(f"Base case: Single activity '{activity}' detected")
-
-        total_traces = sum(log_counter.values())
-        empty_traces = log_counter.get((), 0)
-
-        if debug:
-            print(f"Total traces: {total_traces}, Empty traces: {empty_traces}")
-
-        c_plus = max(0, total_traces * sup - empty_traces)
-
-        if debug:
-            print(f"τ-xor check: c+ = max(0, {total_traces} * {sup} - {empty_traces}) = {c_plus}")
-
-        if c_plus <= 0 and empty_traces > 0:
-            if debug:
-                print("τ-xor condition satisfied, creating τ-xor structure")
-
-            non_empty_log = Counter()
-            for trace, count in log_counter.items():
-                if len(trace) > 0:
-                    non_empty_log[trace] = count
-
-            if non_empty_log:
-                if debug:
-                    print(f"Recursing on non-empty log with {sum(non_empty_log.values())} traces")
-                
-                # Pass parent_was_tau=True because this is a tau-based structure
-                # Pass the cache down
-                child = recursion_full(non_empty_log, w_forward_cache, depth + 1, max_depth, sup, debug=debug, parent_was_tau=True)
-                return ProcessTreeNode(operator='exc', children=[
-                    ProcessTreeNode(activity=None),
-                    child
-                ])
-            else:
-                return ProcessTreeNode(activity=None)
-
-        total_events = 0
-        self_loop_count = 0
-
-        for trace in log_counter:
-            trace_count = log_counter[trace]
-            total_events += len(trace) * trace_count
-
-            for i in range(len(trace) - 1):
-                if trace[i] == trace[i + 1] == activity:
-                    self_loop_count += trace_count
-
-        events_to_traces_ratio = total_events / total_traces if total_traces > 0 else 0
-
-        if debug:
-            print(f"τ-loop check: events/traces ratio = {events_to_traces_ratio:.2f}")
-            print(f"Self-loop count: {self_loop_count}")
-
-        p_plus = max(0, sup * (total_events / 2) - self_loop_count)
-
-        if debug:
-            print(f"p+ = max(0, {sup} * ({total_events} / 2) - {self_loop_count}) = {p_plus}")
-
-        if p_plus <= 0 and self_loop_count > 0 and events_to_traces_ratio > 1.1:
-            if debug:
-                print("τ-loop condition satisfied, creating loop structure")
-            return ProcessTreeNode(operator='loop', children=[
-                ProcessTreeNode(activity=activity),
-                ProcessTreeNode(activity=None)
-            ])
-
-        if debug:
-            print("Returning single activity leaf node")
-        return ProcessTreeNode(activity=activity)
-
-    if debug:
-        print("Multiple activities detected, proceeding with cut detection")
-
+    # Create graph from log
     try:
         G = log_to_graph(log_counter)
-        if debug:
-            print(f"Graph created with {len(G.nodes())} nodes and {len(G.edges())} edges")
     except Exception as e:
         if debug:
             print(f"Graph creation failed: {e}")
         raise e
 
-    # --- Caching logic for seq_cut (W_forward_cache) ---
-    # If a cache is passed, use it.
-    # If not (e.g., top-level call), calculate it once for this subgraph.
-    # This cache will then be passed down to all children.
-    if w_forward_cache is None:
+    # Get start and end activities (Required for V1 logic checks)
+    start_activities_set, end_activities_set = get_start_end_activities(G)
+
+    # exc_tau: Checks if 'start' -> 'end' edge exists
+    can_have_xor_tau = (
+            G.has_edge('start', 'end') and
+            G['start']['end'].get('weight', 0) > 0
+    )
+
+    # loop_tau: Checks for back-edges and strict self-loops on start nodes
+    G_indirect = generate_nx_indirect_graph(log_counter)
+    can_have_loop_tau = check_loop_tau(G_indirect, start_activities_set, end_activities_set)
+
+    # SPECIAL CASE: Single activity
+    if len(all_activities) == 1:
+        activity = next(iter(all_activities))
         if debug:
-            print("Calculating W_forward_cache (eventual-follows) for this subgraph...")
-        # Note: This passes 'log', which is the original log object,
-        # not 'log_counter'. cost_eventual is built to handle this.
-        w_forward_cache = cost_eventual(G, log_counter, sup) 
+            print(f"Single activity '{activity}' detected, checking for tau cuts...")
+            print('xor_tau_allowed?', can_have_xor_tau, 'loop_tau_allowed', can_have_loop_tau)
+
+        # exc_tau 
+        if can_have_xor_tau:
+            try:
+                # Calculate cost using V1 formula
+                start_to_act_end = n_edges(G, {'start'}, {activity, 'end'})
+                start_to_end = n_edges(G, {'start'}, {'end'})
+
+                total_cost = max(0, sup * start_to_act_end - start_to_end)
+
+                # total_cost = calculate_exc_tau_cost_v2(G, sup)
+
+                if debug:
+                    print(f"exc_tau cost for single activity: {total_cost}")
+
+                if total_cost <= 0:
+                    if debug:
+                        print(f"Using exc_tau (optional activity) for single activity '{activity}'")
+
+                    # τ or A 
+                    child1 = ProcessTreeNode(activity=None)  # tau
+                    child2 = ProcessTreeNode(activity=activity)  # activity
+                    return ProcessTreeNode(operator='exc', children=[child1, child2])
+
+            except Exception as e:
+                if debug:
+                    print(f"exc_tau calculation failed: {e}")
+
+        # LOOP(A, τ)
+        if can_have_loop_tau:
+            try:
+                # print('calculating loop_tau cost')
+                in_to_act = n_edges(G, {'start', activity}, {activity})
+                act_self_loop = n_edges(G, {activity}, {activity})
+
+                total_cost = max(0, sup * (in_to_act / 2) - act_self_loop)
+
+                # print('no worries')
+                if debug:
+                    print(f"loop_tau cost for single activity: {total_cost}")
+
+                if total_cost <= tau_cost_threshold:
+                    if debug:
+                        print(f"Using loop_tau (repeating activity) for single activity '{activity}'")
+
+                    # LOOP(A, τ) - do A at least once, then optionally repeat
+                    child1 = ProcessTreeNode(activity=activity)  # do part (at least once)
+                    child2 = ProcessTreeNode(activity=None)  # redo part (τ, optional)
+                    return ProcessTreeNode(operator='loop', children=[child1, child2])
+
+            except Exception as e:
+                if debug:
+                    print(f"loop_tau calculation failed: {e}")
+
+        # If no tau cuts apply, return leaf node
         if debug:
-            print("... W_forward_cache calculation complete.")
-    # --- End Caching Logic ---
+            print(f"No tau cuts apply, returning leaf node for '{activity}'")
+        return ProcessTreeNode(activity=activity)
+
+    # MULTIPLE ACTIVITIES: Proceed with regular cut detection
+    if debug:
+        print("Multiple activities detected, proceeding with cut detection")
 
     cut_results = {
-        'exc_tau': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'n': 0, 'success': False},
-        'loop_tau': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'n': 0, 'success': False},
-        'exc': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'n': 0, 'success': False},
-        'seq': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'n': 0, 'success': False},
-        'par': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'n': 0, 'success': False},
-        'loop': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'n': 0, 'success': False}
+        'exc_tau': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
+        'loop_tau': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
+        'exc': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
+        'seq': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
+        'par': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
+        'loop': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False}
     }
 
-    # Define all possible cut functions
-    all_cut_functions = [
+    # --- Calculate Tau Cut Costs (V1 Logic) ---
+
+    if can_have_xor_tau:
+        try:
+            # print('calculating total_cost xor_tau:')
+            total_cost = calculate_exc_tau_cost_v2(G, sup)
+            # print('total_cost xor_tau:', total_cost)
+            # If structure matches, the split is "All Acts" vs "Empty"
+            Sigma_1 = all_activities
+            Sigma_2 = None
+
+            if debug:
+                print(f"exc_tau result: cost={total_cost}, Sigma_1={Sigma_1}, Sigma_2={Sigma_2}")
+
+            cut_results['exc_tau'] = {
+                'Sigma_1': Sigma_1,  # All activities
+                'Sigma_2': Sigma_2,  # Empty set (τ)
+                'cost': total_cost,
+                'success': True
+            }
+        except Exception as e:
+            if debug:
+                print(f"exc_tau calculation failed: {e}")
+
+    if can_have_loop_tau:
+        try:
+            # print('calculating total_cost loop_tau:')
+            total_cost = calculate_loop_tau_cost_v2(G, sup, start_activities_set, end_activities_set)
+            # print('total_cost loop_tau:', total_cost)
+            # If structure matches, the split is "All Acts" vs "Empty"
+            Sigma_1 = all_activities
+            Sigma_2 = None
+
+            if debug:
+                print(f"loop_tau result: cost={total_cost}, Sigma_1={Sigma_1}, Sigma_2={Sigma_2}")
+
+            cut_results['loop_tau'] = {
+                'Sigma_1': Sigma_1,  # All activities (do part - at least once)
+                'Sigma_2': Sigma_2,  # Empty set (τ) - redo part
+                'cost': total_cost,
+                'success': True
+            }
+        except Exception as e:
+            if debug:
+                print(f"loop_tau calculation failed: {e}")
+
+    # Use ILP functions for non-tau cuts (Original V2 Logic)
+    cut_functions = [
         ('seq', seq_cut_ilp),
         ('exc', xor_cut_ilp),
         ('par', par_cut_ilp),
         ('loop', loop_cut_ilp),
-        ('exc_tau', xor_cut_tau),
-        ('loop_tau', loop_cut_tau)
     ]
 
-    # Filter out tau cuts if the parent was a tau cut
-    if parent_was_tau:
-        if debug:
-            print("🔒 Parent was a tau cut, filtering to non-tau cuts only.")
-        cut_functions = [(op, func) for op, func in all_cut_functions if '_tau' not in op]
-    else:
-        cut_functions = all_cut_functions
-
-    # Track best and second-best cuts
-    best_op = None
-    best_cost = float('inf')
-    second_best_op = None
-    second_best_cost = float('inf')
-    
     found_perfect_cut = False
 
     for op_name, cut_func in cut_functions:
         if found_perfect_cut:
-            if debug:
-                print(f"  Skipping {op_name} cut - already found perfect solution")
             continue
 
         try:
@@ -254,237 +348,161 @@ def recursion_full(log, w_forward_cache=None, depth=0, max_depth=20, sup=1.0, de
                 print(f"Trying {op_name} cut...")
 
             if op_name == 'seq':
-                # Pass the w_forward_cache to seq_cut_ilp
-                Sigma_1, Sigma_2, total_cost, nodes = cut_func(G, log, sup, W_forward_cache=w_forward_cache)
+                Sigma_1, Sigma_2, total_cost, nodes = cut_func(G, log_counter, sup)
             elif op_name == 'loop':
-                # Pass the w_forward_cache to seq_cut_ilp
-                Sigma_1, Sigma_2, total_cost, nodes = cut_func(G, sup, debug)
+                Sigma_1, Sigma_2, total_cost, nodes = cut_func(G, sup)
             else:
                 Sigma_1, Sigma_2, total_cost, nodes = cut_func(G, sup)
 
             if debug:
-                print(f"  {op_name} cut result: Sigma_1={Sigma_1}, Sigma_2={Sigma_2}, cost={total_cost}")
+                print(f" {op_name} cut result: Sigma_1={Sigma_1}, Sigma_2={Sigma_2}, cost={total_cost}")
 
-            is_tau_cut = op_name in ['exc_tau', 'loop_tau']
-            valid_binary_cut = (not is_tau_cut) and (Sigma_1 and Sigma_2)
-            
-            valid_tau_cut = False
-            if is_tau_cut and Sigma_1:
-                valid_tau_cut = True
-                if Sigma_2 is None:
-                    Sigma_2 = set()
+            # For non-tau cuts, both Sigma_1 and Sigma_2 must be non-empty
+            valid_binary_cut = (Sigma_1 and Sigma_2)
 
             if (total_cost is not None and total_cost < float('inf')
-                    and (valid_binary_cut or valid_tau_cut)):
-
-                if Sigma_2 is None:
-                    Sigma_2 = set()
+                    and valid_binary_cut):
 
                 cut_results[op_name] = {
                     'Sigma_1': Sigma_1, 'Sigma_2': Sigma_2,
-                    'cost': total_cost, 'n': nodes, 'success': True
+                    'cost': total_cost, 'success': True
                 }
 
-                # Logic to find best and second-best
-                if total_cost < best_cost:
-                    # Demote old best to second-best
-                    second_best_cost = best_cost
-                    second_best_op = best_op
-                    # Promote new to best
-                    best_cost = total_cost
-                    best_op = op_name
-                    
-                    if debug:
-                        print(f"  ✓ {op_name} cut successful with cost {total_cost} (new best)")
-                        
-                elif total_cost < second_best_cost:
-                    # Set new second-best
-                    second_best_cost = total_cost
-                    second_best_op = op_name
-                    if debug:
-                        print(f"  ✓ {op_name} cut successful with cost {total_cost} (new second-best)")
-                else:
-                    if debug:
-                         print(f"  ✓ {op_name} cut successful with cost {total_cost}")
-
                 if total_cost < 1e-7:
-                    if debug:
-                        print(f"  🎯 PERFECT {op_name.upper()} CUT FOUND! Stopping cut evaluation.")
                     found_perfect_cut = True
-
             else:
                 if debug:
-                    print(f"  ✗ {op_name} cut invalid - empty sets or infinite cost")
+                    print(f" ✗ {op_name} cut invalid")
 
         except Exception as e:
             if debug:
-                print(f"  ✗ {op_name} cut failed: {e}")
+                print(f" ✗ {op_name} cut failed: {e}")
 
-    if debug:
-        print(f"Best cut: {best_op}, Second best: {second_best_op}")
+    # 1. Gather all successful cuts
+    candidates = []
+    for op, res in cut_results.items():
+        if res['success']:
+            candidates.append((op, res['cost']))
 
+    # 2. Sort by cost (Ascending)
+    candidates.sort(key=lambda x: x[1])
 
-    current_op = best_op
-    
-    # We will try the best_op. If it's a tau cut and fails,
-    # this loop will set current_op = second_best_op and try again once.
-    while current_op is not None:
+    if not candidates:
+        # No valid cut found - this happens when the model is a flower model
+        if debug:
+            print(f"No valid cut found, returning flower model for activities: {all_activities}")
+
+        # Create an exclusive choice over all activities
+        children = []
+        for activity in all_activities:
+            children.append(ProcessTreeNode(activity=activity))
+
+        return ProcessTreeNode(operator='exc', children=children)
+
+    # 3. Iterate through candidates until one successfully splits the log
+    for current_op, cost in candidates:
+        if debug:
+            print(f"Splitting log with {current_op} (cost={cost})...")
+
         try:
-            # 1. Get Sigmas for the current_op
-            if current_op not in cut_results or not cut_results[current_op]['success']:
-                 raise KeyError(f"No valid cut data found for {current_op}.")
-                 
             best_Sigma_1 = cut_results[current_op]['Sigma_1']
             best_Sigma_2 = cut_results[current_op]['Sigma_2']
 
-            if debug:
-                print(f"Splitting log with {current_op} cut...")
-                print(f"  Log: {len(log_counter)} unique traces, {sum(log_counter.values())} total occurrences")
-                print(f"  Sigma_1: {best_Sigma_1}")
-                print(f"  Sigma_2: {best_Sigma_2}")
-            
-            # 2. Perform the split
             if current_op in ['loop_tau', 'exc_tau']:
-                start_activities = [tgt for src, tgt in G.out_edges('start') if tgt != 'end']
-                end_activities = [src for src, tgt in G.in_edges('end') if src != 'start']
-                if debug:
-                    print(f"  (Tau cut) Start activities: {start_activities}")
-                    print(f"  (Tau cut) End activities: {end_activities}")
-                log1_counter, log2_counter = split.split(current_op, [start_activities, end_activities], log_counter)
+                # For tau cuts, use start and end activities for splitting
+                start_activities_set, end_activities_set = get_start_end_activities(G)
+
+                start_activities_list = list(start_activities_set)
+                end_activities_list = list(end_activities_set)
+                log1_counter, log2_counter = split.split(current_op, [start_activities_list, end_activities_list],
+                                                         log_counter)
             else:
                 log1_counter, log2_counter = split.split(current_op, [best_Sigma_1, best_Sigma_2], log_counter)
-            # After the split operation, add this:
-            if debug:
-                print("DEBUG - Checking split results:")
-                print(f"Original activities: {all_activities}")
-                print(f"Sigma_1: {best_Sigma_1}")
-                print(f"Sigma_2: {best_Sigma_2}")
-                print(f"Log1 activities: {_get_all_activities_from_counter(log1_counter)}")
-                print(f"Log2 activities: {_get_all_activities_from_counter(log2_counter)}")
-                print(f"Log1 sample traces: {list(log1_counter.keys())[:3]}")
-                print(f"Log2 sample traces: {list(log2_counter.keys())[:3]}")
-            # 3. Check for a failed tau split (no change in log)
-            is_tau_cut = current_op in ['loop_tau', 'exc_tau']
-            # Split fails if log2 is empty (no split) or log1 is unchanged (failing split)
-            split_failed = is_tau_cut and (not log2_counter or log1_counter == log_counter)
 
-            if split_failed:
+            # --- FAIL SAFE CHECK ---
+            # Check-infinite recursion
+            if len(log1_counter) == 0 and len(log2_counter) == 0:
                 if debug:
-                    print(f"✗ Split failed for {current_op} (no actual change in log).")
-                
-                if second_best_op is not None:
+                    print(f"✗ Split failed for {current_op}: Both logs empty.")
+                continue
+
+            if len(log1_counter) == len(log_counter) and set(log1_counter.keys()) == set(log_counter.keys()):
+                if debug:
+                    print(f"✗ Split failed for {current_op}: Infinite recursion (log1 unchanged).")
+                continue
+
+            if len(log2_counter) == len(log_counter) and set(log2_counter.keys()) == set(log_counter.keys()):
+                if debug:
+                    print(f"✗ Split failed for {current_op}: Infinite recursion (log2 unchanged).")
+                continue
+
+            # For binary cuts, both logs must be non-empty
+            if current_op not in ['exc_tau', 'loop_tau']:
+                if not log2_counter:
                     if debug:
-                        print(f"  ... Switching to second best cut: {second_best_op}")
-                    # Promote second_op to current_op and try again
-                    current_op = second_best_op
-                    second_best_op = None # Don't try to switch again
-                    continue # Restart the loop with the new op
-                else:
+                        print(f"✗ Split failed for {current_op}: Binary split resulted in empty second log.")
+                    continue
+                elif not log1_counter:
                     if debug:
-                        print(f"  ... No second best cut available. Halting.")
-                    # No second option, we must fail.
-                    raise Exception(f"Tau split failed for {current_op} and no second best cut was found.")
+                        print(f"✗ Split failed for {current_op}: Binary split resulted in empty first log.")
+                    continue
 
-            # 4. If we are here, the split was successful
-            if debug:
-                print(f"✓ Split successful with {current_op}")
-                print(f"  Log1: {len(log1_counter)} unique traces, {sum(log1_counter.values())} total occurrences")
-                print(f"  Log2: {len(log2_counter)} unique traces, {sum(log2_counter.values())} total occurrences")
-            
-            # Determine if the current op is a tau cut
-            current_op_is_tau = current_op in ['exc_tau', 'loop_tau']
-            if debug and current_op_is_tau:
-                print(f"🔒 Propagating parent_was_tau=True to children, as {current_op} is a tau cut.")
-
-            # Pass the cache and the new flag to the recursive calls
-            child1 = recursion_full(log1_counter, w_forward_cache, depth + 1, max_depth, sup, debug=debug, parent_was_tau=current_op_is_tau)
-            child2 = recursion_full(log2_counter, w_forward_cache, depth + 1, max_depth, sup, debug=debug, parent_was_tau=current_op_is_tau)
-
-            # Map tau cuts to standard operators
+            # --- RECURSE ---
+            # Handle tau cuts
             if current_op in ['exc_tau', 'loop_tau']:
+                if not log1_counter and log2_counter:
+                    # log1 is empty (τ), log2 has activities
+                    if current_op == 'exc_tau':
+                        # τ ⊕ acts: left child is τ, right child is acts
+                        child1 = ProcessTreeNode(activity=None)
+                        child2 = recursion_full(log2_counter, depth + 1, max_depth, sup, debug=debug)
+                    else:  # loop_tau
+                        # LOOP(acts, τ): left child is acts, right child is τ
+                        child1 = recursion_full(log2_counter, depth + 1, max_depth, sup, debug=debug)
+                        child2 = ProcessTreeNode(activity=None)
+                elif log1_counter and not log2_counter:
+                    # log1 has activities, log2 is empty (τ)
+                    if current_op == 'exc_tau':
+                        # τ ⊕ acts: left child is τ, right child is acts
+                        child1 = ProcessTreeNode(activity=None)
+                        child2 = recursion_full(log1_counter, depth + 1, max_depth, sup, debug=debug)
+                    else:  # loop_tau
+                        # LOOP(acts, τ): left child is acts, right child is τ
+                        child1 = recursion_full(log1_counter, depth + 1, max_depth, sup, debug=debug)
+                        child2 = ProcessTreeNode(activity=None)
+                elif log1_counter and log2_counter:
+                    # Both have activities (unusual for tau cuts)
+                    child1 = recursion_full(log1_counter, depth + 1, max_depth, sup, debug=debug)
+                    child2 = recursion_full(log2_counter, depth + 1, max_depth, sup, debug=debug)
+                else:
+                    # Both empty
+                    child1 = ProcessTreeNode(activity=None)
+                    child2 = ProcessTreeNode(activity=None)
+
+                # Remove '_tau' suffix for operator
                 standard_op = current_op.replace('_tau', '')
-                if debug:
-                    print(f"Converting tau cut {current_op} to standard operator {standard_op}")
                 return ProcessTreeNode(operator=standard_op, children=[child1, child2])
             else:
+                # For non-tau cuts, both logs should have activities
+                child1 = recursion_full(log1_counter, depth + 1, max_depth, sup, debug=debug)
+                child2 = recursion_full(log2_counter, depth + 1, max_depth, sup, debug=debug)
                 return ProcessTreeNode(operator=current_op, children=[child1, child2])
 
         except Exception as e:
             if debug:
                 print(f"Split failed for operator {current_op}: {e}")
-                import traceback
-                traceback.print_exc()
-            raise e # Re-raise the exception
+            continue  # Try next best candidate
 
-    # If we exit the loop (e.g., best_op was None to begin with), raise the original error
-    raise Exception(f"No valid cut found for subgraph with activities: {all_activities}. Halting.")
-    
+    # If we exit the loop, ALL candidates failed
+    # Return a flower model as fallback
+    if debug:
+        print(f"All {len(candidates)} valid cuts failed to partition the log. Returning flower model.")
 
-def _get_all_activities_from_counter(log_counter):
-    """Extract all unique activities from a Counter log"""
-    all_activities = set()
-    for trace in log_counter:
-        all_activities.update(trace)
-    return all_activities
+    children = []
+    for activity in all_activities:
+        children.append(ProcessTreeNode(activity=activity))
+
+    return ProcessTreeNode(operator='exc', children=children)
 
 
-def _get_all_activities(log):
-    """Helper to extract all unique activities from log (handles multiple formats)"""
-    if isinstance(log, Counter):
-        return _get_all_activities_from_counter(log)
-    elif hasattr(log, '__class__') and 'EventLog' in str(log.__class__):
-        all_activities = set()
-        for trace in log:
-            all_activities.update(event['concept:name'] for event in trace)
-        return all_activities
-    else:
-        all_activities = set()
-        for trace in log:
-            if trace:
-                if isinstance(trace[0], dict):
-                    all_activities.update(ev['concept:name'] for ev in trace)
-                else:
-                    all_activities.update(trace)
-        return all_activities
 
-
-def _extract_activity_name(activity):
-    """Extract just the activity name from an event object"""
-    if isinstance(activity, dict) and 'concept:name' in activity:
-        return activity['concept:name']
-    elif isinstance(activity, str):
-        return activity
-    else:
-        return str(activity)
-
-
-def _create_exclusive_choice_node(activities):
-    """Helper function to create an exclusive choice node from a set of activities"""
-    activities_list = list(activities)
-    if len(activities_list) == 1:
-        activity_name = _extract_activity_name(activities_list[0])
-        return ProcessTreeNode(activity=activity_name)
-    else:
-        children = [ProcessTreeNode(activity=_extract_activity_name(act)) for act in activities_list]
-        return ProcessTreeNode(operator='exc', children=children)
-
-
-def to_pm4py_tree(node, parent=None):
-    """Converts the internal ProcessTreeNode to a PM4Py ProcessTree object"""
-    tree = ProcessTree()
-    tree.parent = parent
-
-    if node.activity is not None:
-        tree.label = node.activity
-    else:
-        op_map = {
-            'seq': Operator.SEQUENCE,
-            'exc': Operator.XOR,
-            'par': Operator.PARALLEL,
-            'loop': Operator.LOOP
-        }
-        tree.operator = op_map.get(node.operator, None)
-        for child in node.children:
-            child_tree = to_pm4py_tree(child, parent=tree)
-            tree.children.append(child_tree)
-    return tree
