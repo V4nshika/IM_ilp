@@ -1,13 +1,12 @@
-import networkx as nx
 import gurobipy as gp
 from gurobipy import GRB
 from IM_ilp.Helper_Functions import preprocess_graph, extract_activities, log_to_graph
 import numpy as np
+import networkx as nx
 from local_pm4py.cut_quality.cost_functions.cost_functions import cost_loop
 
-
 def nx_to_mat_and_weights_loop(G):
-
+    """ Converts NetworkX graph to adjacency/weight matrices and node maps. """
     nodes = list(G.nodes())
     node_index = {node: i for i, node in enumerate(nodes)}
     n = len(nodes)
@@ -24,7 +23,19 @@ def nx_to_mat_and_weights_loop(G):
 
 
 def add_mccormick_piecewise(model, z, x, y, x_min, x_max, y_min, y_max, n_pieces=4, base_name="prod"):
-   
+    """
+    Adds a tighter piecewise-linear McCormick approximation for z = x * y.
+    This is used to linearize the non-linear product of two variables (M * r).
+    
+    Args:
+        model: The gurobipy model.
+        z: The gp.Var that will hold the product (z = x*y).
+        x: The first gp.Var in the product.
+        y: The second gp.Var in the product.
+        ...bounds: The min/max values for x and y.
+        n_pieces: The number of pieces for the linear approximation.
+        base_name: A simple string used to create unique names for helper variables.
+    """
     
     # Standard McCormick envelopes (a basic approximation)
     model.addConstr(z >= x_min * y + x * y_min - x_min * y_min)
@@ -69,7 +80,11 @@ def add_mccormick_piecewise(model, z, x, y, x_min, x_max, y_min, y_max, n_pieces
 
 
 def _compute_partition_parameters(model, x, nodes, node_index, A, W, sup=1.0):
-   
+    """
+    This is the core of the ILP. It builds all the variables and constraints
+    needed to calculate the five cost components (c1-c5) 
+    in the paper.
+    """
     n = A.shape[0]
     start_idx = nodes.index('start')
     end_idx = nodes.index('end')
@@ -84,7 +99,7 @@ def _compute_partition_parameters(model, x, nodes, node_index, A, W, sup=1.0):
     sigma_end_nodes = [a for a in non_terminal if A[a, end_idx]]     # Nodes before 'end'
     candidate_bs = non_terminal # Sigma_2 is all non_terminal nodes
 
-    # === c1, c2, c3 (Linear Deviating Costs - Def 12, c1, c2, c3) ===
+    # === c1, c2, c3 (Linear Deviating Costs) ===
     
     # c1: Cost of start -> Sigma_2 or Sigma_2 -> end
     c1_term1 = gp.quicksum(edge_count(start_idx, j) * x[j] for j in non_terminal if A[start_idx, j])
@@ -117,7 +132,7 @@ def _compute_partition_parameters(model, x, nodes, node_index, A, W, sup=1.0):
                 model.addConstr(w3[(i, j)] >= x[i] + (1 - x[j]) - 1)
     c3 = gp.quicksum(edge_count(i, j) * w3[(i, j)] for (i, j) in w3)
 
-    # === M (Max flow variable - Def 12, M) ===
+    # === M (Max flow variable ) ===
     # This M is the *total frequency* of edges from Sigma_2 to Sigma_1_start
     # or from Sigma_1_end to Sigma_2.
     
@@ -136,24 +151,28 @@ def _compute_partition_parameters(model, x, nodes, node_index, A, W, sup=1.0):
     # Total flow incoming to Sigma_1_start (from anywhere)
     incoming_sigma1start_terms = [
         edge_count(i, a) * z_start[a]
-        for i in range(n) for a in sigma_start_nodes if A[i, a]
+        for i in range(n) 
+        for a in sigma_start_nodes 
+        if A[i, a] and i != start_idx  # <--- Exclude global start
     ]
     incoming_sigma1start = gp.quicksum(incoming_sigma1start_terms) if incoming_sigma1start_terms else 0
 
     # Total flow outgoing from Sigma_1_end (to anywhere)
     outgoing_sigma1end_terms = [
         edge_count(a, j) * z_end[a]
-        for a in sigma_end_nodes for j in range(n) if A[a, j]
+        for a in sigma_end_nodes 
+        for j in range(n) 
+        if A[a, j] and j != end_idx  # <--- Exclude global end
     ]
     outgoing_sigma1end = gp.quicksum(outgoing_sigma1end_terms) if outgoing_sigma1end_terms else 0
 
-    total_edges_upper = sum(edge_count(i, j) for i in range(n) for j in range(n) if A[i, j])
+    total_edges_upper = W.sum()
     M = model.addVar(lb=0, ub=total_edges_upper, vtype=GRB.CONTINUOUS, name="M")
     model.addConstr(M >= incoming_sigma1start)
     model.addConstr(M >= outgoing_sigma1end)
     M_max = total_edges_upper
 
-    # === c4 (Missing Cost - Def 12, c4) ===
+    # === c4 (Missing Cost) ===
     # This is the non-linear part: cost = max(0, sup * M * ... - count(b,a))
     
     # z_b_2out[b] = 1 if node 'b' is in Sigma_2 (x[b]==1)
@@ -250,7 +269,7 @@ def _compute_partition_parameters(model, x, nodes, node_index, A, W, sup=1.0):
 
     c4 = gp.quicksum(t4[(a, b)] for (a, b) in t4) if t4 else 0
 
-    # === c5 (Symmetric to c4 - Def 12, c5) ===
+    # === c5 (Symmetric to c4) ===
     # This is the same logic as c4, but for the other direction:
     # (Sigma_1_end -> Sigma_2)
     
@@ -345,9 +364,12 @@ def _compute_partition_parameters(model, x, nodes, node_index, A, W, sup=1.0):
     return c1, c2, c3, c4, c5
 
 
-# --- CONVERTED: This is the main function, now using gurobipy ---
-def loop_cut_ilp(G, sup=1.0, debug=False):
-    
+def loop_cut_ilp(G, sup=1.0):
+    """
+    Finds the optimal loop cut by building and solving the ILP
+    formulation from Definition 12.
+    """
+    debug=False
 
     start_node = 'start'
     end_node = 'end'
@@ -364,7 +386,12 @@ def loop_cut_ilp(G, sup=1.0, debug=False):
         return []
 
     if nx.is_directed_acyclic_graph(reduced_graph):
+        print("is DAG")
         return set(), set(), None, list(reduced_graph.nodes())
+
+    #else:
+        #print("Not DAG, continuing")
+
 
     A, W, nodes, node_index = nx_to_mat_and_weights_loop(reduced_graph)
     n = A.shape[0]
@@ -407,12 +434,11 @@ def loop_cut_ilp(G, sup=1.0, debug=False):
     model.setObjective(c1 + c2 + c3 + c4 + c5, GRB.MINIMIZE)
 
     # === 6. Solve ===
-    if not debug:
-        model.setParam('OutputFlag', 0) # Silence Gurobi logs
-    else:
-        model.write("loop_cut_problem.lp") # Write LP file for debugging
+    model.setParam('OutputFlag', 0)
         
     model.optimize()
+
+    
     
     # === 7. Extract Results ===
     if model.Status == GRB.OPTIMAL:
@@ -450,7 +476,7 @@ def loop_cut_ilp(G, sup=1.0, debug=False):
                 end_activities_set
                )
             total_cost_paper = calculate_total_cost(cost_dict)
-            
+            # debug=True
             if debug and abs(total_cost_paper - total_cost_ilp) > 1e-5: # Compare floats
                 print(f"Cost approximated. ILP Cost: {total_cost_ilp}, Paper Cost: {total_cost_paper}")
         
@@ -466,7 +492,6 @@ def loop_cut_ilp(G, sup=1.0, debug=False):
     else:
         print(f"Warning: Solver failed to find optimal solution. Status: {model.Status}")
         return [], [], None, nodes
-
 
 def compute_partition_parameters(G, Sigma_1, Sigma_2, start_node, end_node, node_index, A):
     """
@@ -517,8 +542,6 @@ def compute_partition_parameters(G, Sigma_1, Sigma_2, start_node, end_node, node
     return start_A, end_A, input_B, output_B, start_activities, end_activities
      
     
-
-
 def calculate_total_cost(cost_dict):
     """
     Calculates total cost from the dictionary returned by cost_loop.
