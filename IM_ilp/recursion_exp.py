@@ -1,14 +1,11 @@
-import IM_ilp_gurobi.split as split
-import pm4py
-from pm4py.objects.process_tree.obj import ProcessTree, Operator
-from pm4py.objects.log.obj import EventLog, Trace, Event
+import IM_ilp_gurobi.split_try as split
 # from prolysis.discovery.split_functions import split
 from collections import Counter
-from IM_ilp.Helper_Functions import log_to_graph, _convert_log_to_counter, generate_nx_indirect_graph
-from IM_ilp.seq_cut_ilp import seq_cut_ilp_linearized as seq_cut_ilp
-from IM_ilp.xor_cut_ilp import xor_cut_ilp, xor_cut_tau
-from IM_ilp.par_cut_ilp import par_cut_ilp
-from IM_ilp.loop_cut_ilp import loop_cut_ilp, loop_cut_tau
+from IM_ilp_gurobi.Helper_Functions import log_to_graph, _convert_log_to_counter, generate_nx_indirect_graph
+from IM_ilp_gurobi.seq_cut_ilp import seq_cut_ilp_linearized as seq_cut_ilp
+from IM_ilp_gurobi.xor_cut_ilp import xor_cut_ilp, xor_cut_tau
+from IM_ilp_gurobi.par_cut_ilp import par_cut_ilp
+from IM_ilp_gurobi.loop_cut_ilp import loop_cut_ilp, loop_cut_tau
 
 
 class ProcessTreeNode:
@@ -35,6 +32,82 @@ class ProcessTreeNode:
             children_repr = ", ".join(repr(child) for child in self.children)
             return f"({self.operator}, {children_repr})"
 
+
+def flatten_process_tree(node):
+    """
+    Flattens a ProcessTreeNode based on the reduction rules from the
+    Inductive Miner paper (Leemans et al., 2013, Property 10).
+
+    Rules applied:
+    1. Singleton: Operator(Child) -> Child
+    2. Associativity: OP(A, OP(B, C)) -> OP(A, B, C) for SEQ, XOR, PAR
+    3. Loop Normal Form:
+       - Loop(Loop(A, B), C) -> Loop(A, B, C)
+       - Loop(A, XOR(B, C)) -> Loop(A, B, C)
+    """
+    # 1. Base Case: Leaf node
+    if node.activity is not None:
+        return node
+
+    # 2. Recursive Step: Flatten children first (Bottom-Up)
+    # We rebuild the children list to handle replacements
+    flattened_children = []
+    for child in node.children:
+        flattened_children.append(flatten_process_tree(child))
+    node.children = flattened_children
+
+    # 3. Apply Reduction Rules
+
+    # --- Rule 1: Singleton Reduction ---
+    # If a node has an operator but only 1 child, replace node with child.
+    if len(node.children) == 1:
+        return node.children[0]
+
+    # --- Rule 2: Associativity (SEQ, XOR, PAR) ---
+    # If parent and child have the same operator (and it's not a loop), flatten.
+    if node.operator in ['seq', 'exc', 'par']:
+        new_children = []
+        for child in node.children:
+            if child.activity is None and child.operator == node.operator:
+                # Extend with grandchildren (flattening)
+                new_children.extend(child.children)
+            else:
+                new_children.append(child)
+        node.children = new_children
+
+    # --- Rule 3: Loop Reduction ---
+    # Specific rules for Loop operator defined in the IM paper
+    if node.operator == 'loop':
+        # The first child is the 'body' (do), the rest are 'redos'
+        body = node.children[0]
+        redos = node.children[1:]
+
+        # 3a. Nested Loop in Body: Loop(Loop(A, B), C) -> Loop(A, B, C)
+        # If the body is itself a loop, merge its redo parts into the parent
+        if body.activity is None and body.operator == 'loop':
+            grand_body = body.children[0]
+            grand_redos = body.children[1:]
+
+            # New body is the grandchild body
+            # New redos are grandchild redos + current redos
+            node.children = [grand_body] + grand_redos + redos
+
+            # Update local vars for next check
+            body = node.children[0]
+            redos = node.children[1:]
+
+        # 3b. XOR in Redo: Loop(A, XOR(B, C)) -> Loop(A, B, C)
+        # If a redo part is an XOR, flatten it into the list of redo parts
+        new_redos = []
+        for redo in redos:
+            if redo.activity is None and redo.operator == 'exc':
+                new_redos.extend(redo.children)
+            else:
+                new_redos.append(redo)
+
+        node.children = [body] + new_redos
+
+    return node
 
 def _get_all_activities_from_counter(log_counter):
     """Extract all unique activities from a Counter log"""
@@ -95,6 +168,8 @@ def calculate_exc_tau_cost_v2(G, sup):
     """
     mis = max(0, sup * sum_out_degree(start) - weight(start->end))
     """
+    # Calculate sum_out_degree_single(start)
+    # In V1 this is the total weight leaving the start node
     total_start_out_weight = sum(data['weight'] for _, _, data in G.out_edges('start', data=True))
 
     # Calculate get_edge_weight(start, end)
@@ -200,8 +275,7 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
 
     # exc_tau: Checks if 'start' -> 'end' edge exists
     can_have_xor_tau = (
-            G.has_edge('start', 'end') and
-            G['start']['end'].get('weight', 0) > 0
+            G.has_edge('start', 'end') #and G['start']['end'].get('weight', 0) > 0
     )
 
     # loop_tau: Checks for back-edges and strict self-loops on start nodes
@@ -212,19 +286,48 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
     if len(all_activities) == 1:
         activity = next(iter(all_activities))
         if debug:
+            print(log_counter)
+            print('xor:', can_have_xor_tau, 'loop:', can_have_loop_tau)
+        if debug:
             print(f"Single activity '{activity}' detected, checking for tau cuts...")
             print('xor_tau_allowed?', can_have_xor_tau, 'loop_tau_allowed', can_have_loop_tau)
+        if can_have_xor_tau and can_have_loop_tau:
+            try:
+                # Calculate cost using V1 formula
+                start_to_act_end = n_edges(G, {'start'}, {activity, 'end'})
+                start_to_end = n_edges(G, {'start'}, {'end'})
 
-        # exc_tau 
+                total_costx = calculate_exc_tau_cost_v2(G, sup)
+
+                in_to_act = n_edges(G, {'start', activity}, {activity})
+                act_self_loop = n_edges(G, {activity}, {activity})
+
+                total_costl = max(0, sup * (in_to_act / 2) - act_self_loop)
+
+                if debug:
+                    print(f"both tau cost for single activity: {total_costx, total_costl}")
+
+                if total_costx <= 0 and total_costl <= 0:
+                    if debug:
+                        print(f"Using exc_tau (optional activity) for single activity '{activity}'")
+
+                    # τ ⊕ A (either do nothing OR do A)
+                    child1 = ProcessTreeNode(activity=None)  # tau
+                    child2 = ProcessTreeNode(activity=activity)  # activity
+                    child3 = ProcessTreeNode(operator='loop', children=[child2, child1])
+                    return ProcessTreeNode(operator='exc', children=[child3, child1])
+
+            except Exception as e:
+                if debug:
+                    print(f"exc_tau calculation failed: {e}")
+        # Check for exc_tau (optional activity): τ ⊕ A
         if can_have_xor_tau:
             try:
                 # Calculate cost using V1 formula
                 start_to_act_end = n_edges(G, {'start'}, {activity, 'end'})
                 start_to_end = n_edges(G, {'start'}, {'end'})
 
-                total_cost = max(0, sup * start_to_act_end - start_to_end)
-
-                # total_cost = calculate_exc_tau_cost_v2(G, sup)
+                total_cost = calculate_exc_tau_cost_v2(G, sup)
 
                 if debug:
                     print(f"exc_tau cost for single activity: {total_cost}")
@@ -233,7 +336,7 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
                     if debug:
                         print(f"Using exc_tau (optional activity) for single activity '{activity}'")
 
-                    # τ or A 
+                    # τ ⊕ A (either do nothing OR do A)
                     child1 = ProcessTreeNode(activity=None)  # tau
                     child2 = ProcessTreeNode(activity=activity)  # activity
                     return ProcessTreeNode(operator='exc', children=[child1, child2])
@@ -242,7 +345,7 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
                 if debug:
                     print(f"exc_tau calculation failed: {e}")
 
-        # LOOP(A, τ)
+        # Check for loop_tau (repeating activity): LOOP(A, τ)
         if can_have_loop_tau:
             try:
                 # print('calculating loop_tau cost')
@@ -278,22 +381,22 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
         print("Multiple activities detected, proceeding with cut detection")
 
     cut_results = {
+
         'exc_tau': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
-        'loop_tau': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
-        'exc': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
         'seq': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
+        'exc': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
         'par': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
-        'loop': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False}
+        'loop': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
+        'loop_tau': {'Sigma_1': None, 'Sigma_2': None, 'cost': float('inf'), 'success': False},
     }
 
-    # --- Calculate Tau Cut Costs (V1 Logic) ---
 
     if can_have_xor_tau:
         try:
             # print('calculating total_cost xor_tau:')
             total_cost = calculate_exc_tau_cost_v2(G, sup)
             # print('total_cost xor_tau:', total_cost)
-            # If structure matches, the split is "All Acts" vs "Empty"
+            # V1 logic: If structure matches, the split is "All Acts" vs "Empty"
             Sigma_1 = all_activities
             Sigma_2 = None
 
@@ -315,7 +418,7 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
             # print('calculating total_cost loop_tau:')
             total_cost = calculate_loop_tau_cost_v2(G, sup, start_activities_set, end_activities_set)
             # print('total_cost loop_tau:', total_cost)
-            # If structure matches, the split is "All Acts" vs "Empty"
+            # V1 logic: If structure matches, the split is "All Acts" vs "Empty"
             Sigma_1 = all_activities
             Sigma_2 = None
 
@@ -334,8 +437,8 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
 
     # Use ILP functions for non-tau cuts (Original V2 Logic)
     cut_functions = [
-        ('seq', seq_cut_ilp),
         ('exc', xor_cut_ilp),
+        ('seq', seq_cut_ilp),
         ('par', par_cut_ilp),
         ('loop', loop_cut_ilp),
     ]
@@ -417,13 +520,17 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
 
                 start_activities_list = list(start_activities_set)
                 end_activities_list = list(end_activities_set)
-                log1_counter, log2_counter = split.split(current_op, [start_activities_list, end_activities_list],
+                if current_op == 'loop_tau':
+                    log1_counter, log2_counter = split.split(current_op, [start_activities_list, end_activities_list],
+                                                         log_counter)
+                else:
+                    log1_counter, log2_counter = split.split(current_op, [all_activities, []],
                                                          log_counter)
             else:
                 log1_counter, log2_counter = split.split(current_op, [best_Sigma_1, best_Sigma_2], log_counter)
 
             # --- FAIL SAFE CHECK ---
-            # Check-infinite recursion
+            # Check for infinite recursion
             if len(log1_counter) == 0 and len(log2_counter) == 0:
                 if debug:
                     print(f"✗ Split failed for {current_op}: Both logs empty.")
@@ -453,6 +560,9 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
             # --- RECURSE ---
             # Handle tau cuts
             if current_op in ['exc_tau', 'loop_tau']:
+
+                # IMPORTANT: For tau cuts, one log should be empty (τ) and the other should contain activities
+
                 if not log1_counter and log2_counter:
                     # log1 is empty (τ), log2 has activities
                     if current_op == 'exc_tau':
@@ -496,42 +606,12 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
                 print(f"Split failed for operator {current_op}: {e}")
             continue  # Try next best candidate
 
-    # If we exit the loop, ALL candidates failed
-    # Return a flower model as fallback
     if debug:
         print(f"All {len(candidates)} valid cuts failed to partition the log. Returning flower model.")
 
-    children = []
-    for activity in all_activities:
-        children.append(ProcessTreeNode(activity=activity))
 
-    return ProcessTreeNode(operator='exc', children=children)
+    return print("something horrible happened")
 
-from pm4py.objects.process_tree.obj import ProcessTree, Operator
 
-def to_pm4py_tree(node, parent=None):
-    """Converts the internal ProcessTreeNode to a PM4Py ProcessTree object"""
-    tree = ProcessTree()
-    tree.parent = parent
 
-    if node.activity is not None:
-        tree.label = node.activity
-    else:
-        op_map = {
-            'seq': Operator.SEQUENCE,
-            'exc': Operator.XOR,
-            'par': Operator.PARALLEL,
-            'loop': Operator.LOOP
-        }
-        tree.operator = op_map.get(node.operator, None)
-        for child in node.children:
-            child_tree = to_pm4py_tree(child, parent=tree)
-            tree.children.append(child_tree)
-    return tree
 
-def apply(log, sup=1.0):
-    pt = recursion_full(log,sup)
-    pt_pm4py = to_pm4py_tree(pt)
-    net_ilp, im_ilp, fm_ilp = pm4py.objects.conversion.process_tree.converter.apply(pt_pm4py)
-    return net_ilp, im_ilp, fm_ilp
-    

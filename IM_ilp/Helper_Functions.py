@@ -247,7 +247,9 @@ def _add_trace_to_eventual_graph(edge_weights, trace, frequency):
                 if not trace:
                                 return
 
-                activities = list(trace) 
+                # Ensure terminals are included in the eventual check
+                # full_trace = ('start',) + trace + ('end',)
+                activities = list(trace)
                 for i in range(len(activities)):
                                 visited = set()
                                 src = activities[i]

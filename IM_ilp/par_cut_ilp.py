@@ -1,6 +1,6 @@
 import gurobipy as gp
 from gurobipy import GRB
-from IM_ilp.Helper_Functions import preprocess_graph, nx_to_mat_and_weights, extract_activities, cost_
+from IM_ilp_gurobi.Helper_Functions import preprocess_graph, nx_to_mat_and_weights, extract_activities, cost_
 
 
 def par_cut_ilp(G, sup=1.0):
@@ -14,7 +14,7 @@ def par_cut_ilp(G, sup=1.0):
 
     # 2. Get cost matrix
     W = cost_(G, sup)  # This has costs for ALL possible pairs
-    
+
     # 3. Handle graph/node indices
     if n == 0 or not node_names:
         return set(), set(), None, []
@@ -22,17 +22,17 @@ def par_cut_ilp(G, sup=1.0):
     start_idx = node_names.index(start_node)
     end_idx = node_names.index(end_node)
     non_terminal = [i for i in range(n) if i not in (start_idx, end_idx)]
-    
+
     if not non_terminal:
         # Graph only contains start/end nodes
         return set(), set(), None, node_names
 
-    # === Gurobipy Model  ===
+    # === Gurobipy Model (based on PuLP V2 logic) ===
     model = gp.Model("PAR_MinCut_Flow_Corrected")
-    model.setParam('OutputFlag', 0) # Suppress console output
+    model.setParam('OutputFlag', 0)  # Suppress console output
 
-    # --- Variables ---
-    
+    # --- Variables (matching PuLP) ---
+
     # Partition variables: x[i]
     x = model.addVars(non_terminal, vtype=GRB.BINARY, name="x")
 
@@ -41,12 +41,12 @@ def par_cut_ilp(G, sup=1.0):
     y = model.addVars(y_indices, vtype=GRB.BINARY, name="y")
 
     # --- 2-FLOWS ---
-    
+
     # Flow variables (reachability from start) - only for existing edges
     edge_indices = [(i, j) for i in range(n) for j in range(n) if A[i, j]]
     f_s = model.addVars(edge_indices, vtype=GRB.INTEGER, lb=0, name="f_s")
-    
-    # Flow variables (reachability to end) - only for existing edges  
+
+    # Flow variables (reachability to end) - only for existing edges
     f_e = model.addVars(edge_indices, vtype=GRB.INTEGER, lb=0, name="f_e")
 
     # === Constraints  ===
@@ -64,7 +64,7 @@ def par_cut_ilp(G, sup=1.0):
     model.addConstr(gp.quicksum(x[i] for i in non_terminal) >= 1, name="non_trivial_1")
     model.addConstr(gp.quicksum(1 - x[i] for i in non_terminal) >= 1, name="non_trivial_2")
 
-    # Big M value 
+    # Big M value
     M = n - 1
 
     # 3. Flow reachability from start (f_s)
@@ -101,8 +101,8 @@ def par_cut_ilp(G, sup=1.0):
 
     # --- Objective ---
     # Minimize total crossing weight for ALL possible pairs
-    objective_expr = gp.quicksum(W.get((node_names[i], node_names[j]), 0) * y[i, j] 
-                                for i, j in y_indices)
+    objective_expr = gp.quicksum(W.get((node_names[i], node_names[j]), 0) * y[i, j]
+                                 for i, j in y_indices)
     model.setObjective(objective_expr, GRB.MINIMIZE)
 
     # --- Solve ---
@@ -117,21 +117,19 @@ def par_cut_ilp(G, sup=1.0):
 
         Sigma_1 = [node_names[i] for i in non_terminal if x[i].X < 0.5]
         Sigma_2 = [node_names[i] for i in non_terminal if x[i].X > 0.5]
-        
+
         # Check for valid partition (from your original code)
         if not Sigma_1 or not Sigma_2:
             print("Empty partition detected (should be prevented by constraints)")
-            total_cost = None # Treat as invalid
-        
+            total_cost = None  # Treat as invalid
+
         # Optional: Warn if not proven optimal
         if model.status != GRB.OPTIMAL:
             print(f"Warning: Solution is feasible but not proven optimal. Status: {model.status}")
 
-    #else:
-        # This block runs only if NO solution was found
-        #print(f"ILP failed to find any feasible solution. Status: {model.status}")
-
-
+    # else:
+    # This block runs only if NO solution was found
+    # print(f"ILP failed to find any feasible solution. Status: {model.status}")
 
     return (
         extract_activities(Sigma_1),

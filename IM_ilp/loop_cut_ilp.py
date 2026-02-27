@@ -1,6 +1,6 @@
 import gurobipy as gp
 from gurobipy import GRB
-from IM_ilp.Helper_Functions import preprocess_graph, extract_activities, log_to_graph
+from IM_ilp_gurobi.Helper_Functions import preprocess_graph, extract_activities, log_to_graph
 import numpy as np
 import networkx as nx
 from local_pm4py.cut_quality.cost_functions.cost_functions import cost_loop
@@ -82,7 +82,7 @@ def add_mccormick_piecewise(model, z, x, y, x_min, x_max, y_min, y_max, n_pieces
 def _compute_partition_parameters(model, x, nodes, node_index, A, W, sup=1.0):
     """
     This is the core of the ILP. It builds all the variables and constraints
-    needed to calculate the five cost components (c1-c5) 
+    needed to calculate the five cost components (c1-c5)
     in the paper.
     """
     n = A.shape[0]
@@ -541,7 +541,7 @@ def compute_partition_parameters(G, Sigma_1, Sigma_2, start_node, end_node, node
     
     return start_A, end_A, input_B, output_B, start_activities, end_activities
      
-    
+
 def calculate_total_cost(cost_dict):
     """
     Calculates total cost from the dictionary returned by cost_loop.

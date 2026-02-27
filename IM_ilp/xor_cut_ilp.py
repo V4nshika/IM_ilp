@@ -1,6 +1,6 @@
 import gurobipy as gp
 from gurobipy import GRB
-from IM_ilp.Helper_Functions import preprocess_graph, extract_activities
+from IM_ilp_gurobi.Helper_Functions import preprocess_graph, extract_activities
 import numpy as np
 
 # This helper function has no PuLP code and remains unchanged.
@@ -64,7 +64,7 @@ def xor_cut_ilp(G, sup=1.0):
     # Flow variables to end (matching PuLP's Integer cat)
     f_e = model.addVars(edge_indices, lb=0, vtype=GRB.INTEGER, name="f_e")
 
-    # 3. Add Constraints 
+    # 3. Add Constraints
 
     # Don't cut start -> * or * -> end edges
     for i, j in edge_indices:
@@ -124,11 +124,11 @@ def xor_cut_ilp(G, sup=1.0):
 
         Sigma_1 = [node_names[i] for i in non_terminal if x[i].X < 0.5]
         Sigma_2 = [node_names[i] for i in non_terminal if x[i].X > 0.5]
-        
+
         if not Sigma_1 or not Sigma_2:
             print("Empty partition detected (should be prevented by constraints)")
             total_cost = None # Treat as invalid
-        
+
         if model.status != GRB.OPTIMAL:
             print(f"Warning: Solution is feasible but not proven optimal. Status: {model.status}")
 
