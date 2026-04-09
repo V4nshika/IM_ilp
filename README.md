@@ -5,11 +5,10 @@ This repository implements the **IM-ILP framework**, a scalable approach to proc
 ---
 
 ### 🧬 Core Logic: Recursive Binary Partitioning
-The framework adopts the divide-and-conquer architecture of the [**Inductive Miner** family](https://doi.org/10.1007/978-3-319-06257-0_6) but is strictly optimized for **binary cuts**.
+The framework adopts the divide-and-conquer architecture of the [**Inductive Miner**](https://doi.org/10.1007/978-3-642-38697-8_17) family but is strictly optimized for **binary cuts**.
 
 * **Recursive Decomposition**: The set of activities from an event log is recursively partitioned into two disjoint subsets.
-* **Tree Formation**: This process continues until the algorithm reaches base cases (e.g., single activities or empty traces), resulting in a sound, block-structured **Process Tree**.
-* **Structural Soundness**: Every discovered model is mathematically guaranteed to be free from deadlocks and livelocks.
+* **Tree Formation**: This process continues until the algorithm reaches base cases (e.g., single activities or empty traces), resulting in a block-structured **Process Tree**.
 
 ---
 
@@ -24,7 +23,7 @@ The framework evaluates four distinct cut types to identify the best behavioral 
 * **Loop ($\circlearrowleft$)**: Models iterative behavior consisting of a mandatory loop body and a redo part that enables repeated execution.
 
 #### **Customizable Cost Functions**
-Current implementation uses cost functions from the **IMbi** framework as objective functions. However, because the per-edge behavioral penalties (deviating and missing costs) are calculated outside the ILPs, the "cost" is fully customizable for the sequence, exclusive choice, and parallel operators.
+Current implementation uses cost functions from the [**IMbi** framework](https://doi.org/10.1145/3555776.3577818) as objective functions. However, because the per-edge behavioral penalties (deviating and missing costs) are calculated outside the ILPs, the "cost" is fully customizable for the sequence, exclusive choice, and parallel operators.
 
 ---
 
