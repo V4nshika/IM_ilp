@@ -1,6 +1,7 @@
 import IM_ilp_gurobi.split_try as split
 # from prolysis.discovery.split_functions import split
 from collections import Counter
+import pm4py
 from IM_ilp_gurobi.Helper_Functions import log_to_graph, _convert_log_to_counter, generate_nx_indirect_graph
 from IM_ilp_gurobi.seq_cut_ilp import seq_cut_ilp_linearized as seq_cut_ilp
 from IM_ilp_gurobi.xor_cut_ilp import xor_cut_ilp, xor_cut_tau
@@ -613,5 +614,33 @@ def recursion_full(log, depth=0, max_depth=20, sup=1.0, debug=False, tau_cost_th
     return print("something horrible happened")
 
 
+def to_pm4py_tree(node, parent=None):
+    """Converts the internal ProcessTreeNode to a PM4Py ProcessTree object"""
+    tree = ProcessTree()
+    tree.parent = parent
+
+    if node.activity is not None:
+        tree.label = node.activity
+    else:
+        op_map = {
+            'seq': Operator.SEQUENCE,
+            'exc': Operator.XOR,
+            'par': Operator.PARALLEL,
+            'loop': Operator.LOOP
+        }
+        tree.operator = op_map.get(node.operator, None)
+        for child in node.children:
+            child_tree = to_pm4py_tree(child, parent=tree)
+            tree.children.append(child_tree)
+    return tree
+
+
+def apply(log_path, sup=1.0):
+    log = xes_importer.apply(str(log_path))
+    log_counter = _convert_log_to_counter(log)
+    process_tree_exp_ilp_counter = recursion_full_improved(filtered_log_counter, sup=sup)
+    tree_data_pm4py = to_pm4py_tree(process_tree_exp_ilp_counter)
+    net, im, fm = pm4py.objects.conversion.process_tree.converter.apply(tree_data_pm4py)
+    return net, im, fm
 
 
