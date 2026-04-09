@@ -1,7 +1,3 @@
-Here is the formatted content for your `README.md`. You can copy and paste this directly into your file.
-
----
-
 # IM-ILP: Optimization-Based Process Discovery
 
 This repository implements the **IM-ILP framework**, a scalable approach to process discovery that reformulates the search for process tree cuts as a mathematical optimization problem. By leveraging Integer Linear Programming (ILP), the tool identifies optimal process structures while bypassing the exponential complexity of traditional exhaustive search methods.
