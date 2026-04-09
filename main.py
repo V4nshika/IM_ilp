@@ -2,7 +2,7 @@ from IM_ilp import recursion_exp as recursion
 from IM_ilp.post_recursion import save_multiple_petri_nets_to_pdf
 import time
 
-log_path = 'sample_logs/BPI_Challenge_2017.xes' 
+log_path = 'sample_logs/BPI_2012_A_O.xes' 
 
 net_03, im_03, fm_03 = recursion.apply(log, sup=0.3, print_time_taken=True)
 
