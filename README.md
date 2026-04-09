@@ -1,11 +1,11 @@
 # IM-ILP: Optimization-Based Process Discovery
 
-This repository implements the **IM-ILP framework**, a scalable approach to process discovery that reformulates the search for process tree cuts as a mathematical optimization problem. By leveraging Integer Linear Programming (ILP), the tool identifies optimal process structures while bypassing the exponential complexity of traditional exhaustive search methods.
+This repository implements the **IM-ILP framework**, a scalable approach to process discovery that reformulates the search for process tree cuts as a mathematical optimization problem. By leveraging integer linear programming, the tool identifies optimal process structures while bypassing the exponential complexity of traditional exhaustive search methods.
 
 ---
 
 ### 🧬 Core Logic: Recursive Binary Partitioning
-The framework adopts the divide-and-conquer architecture of the **Inductive Miner** family but is strictly optimized for **binary cuts**.
+The framework adopts the divide-and-conquer architecture of the [**Inductive Miner** family](https://doi.org/10.1007/978-3-319-06257-0_6) but is strictly optimized for **binary cuts**.
 
 * **Recursive Decomposition**: The set of activities from an event log is recursively partitioned into two disjoint subsets.
 * **Tree Formation**: This process continues until the algorithm reaches base cases (e.g., single activities or empty traces), resulting in a sound, block-structured **Process Tree**.
