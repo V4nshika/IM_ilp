@@ -1,12 +1,12 @@
-import IM_ilp_gurobi.split_try as split
+import IM_ilp.split_try as split
 # from prolysis.discovery.split_functions import split
 from collections import Counter
 import pm4py
-from IM_ilp_gurobi.Helper_Functions import log_to_graph, _convert_log_to_counter, generate_nx_indirect_graph
-from IM_ilp_gurobi.seq_cut_ilp import seq_cut_ilp_linearized as seq_cut_ilp
-from IM_ilp_gurobi.xor_cut_ilp import xor_cut_ilp, xor_cut_tau
-from IM_ilp_gurobi.par_cut_ilp import par_cut_ilp
-from IM_ilp_gurobi.loop_cut_ilp import loop_cut_ilp, loop_cut_tau
+from IM_ilp.Helper_Functions import log_to_graph, _convert_log_to_counter, generate_nx_indirect_graph
+from IM_ilp.seq_cut_ilp import seq_cut_ilp_linearized as seq_cut_ilp
+from IM_ilp.xor_cut_ilp import xor_cut_ilp, xor_cut_tau
+from IM_ilp.par_cut_ilp import par_cut_ilp
+from IM_ilp.loop_cut_ilp import loop_cut_ilp, loop_cut_tau
 
 
 class ProcessTreeNode:

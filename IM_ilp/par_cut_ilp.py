@@ -1,6 +1,6 @@
 import gurobipy as gp
 from gurobipy import GRB
-from IM_ilp_gurobi.Helper_Functions import preprocess_graph, nx_to_mat_and_weights, extract_activities, cost_
+from IM_ilp.Helper_Functions import preprocess_graph, nx_to_mat_and_weights, extract_activities, cost_
 
 
 def par_cut_ilp(G, sup=1.0):
