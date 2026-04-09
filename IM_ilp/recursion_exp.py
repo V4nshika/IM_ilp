@@ -635,12 +635,16 @@ def to_pm4py_tree(node, parent=None):
     return tree
 
 
-def apply(log_path, sup=1.0):
+def apply(log_path, sup=1.0, print_time_taken=False):
     log = xes_importer.apply(str(log_path))
     log_counter = _convert_log_to_counter(log)
+    s = time.time()
     process_tree_exp_ilp_counter = recursion_full_improved(filtered_log_counter, sup=sup)
     tree_data_pm4py = to_pm4py_tree(process_tree_exp_ilp_counter)
     net, im, fm = pm4py.objects.conversion.process_tree.converter.apply(tree_data_pm4py)
+    e = time.time()
+    if print_time_taken:
+        print(e-s)
     return net, im, fm
 
 
