@@ -1,16 +1,12 @@
-from pm4py.objects.log.importer.xes import importer as xes_importer
-import pm4py
-from IM_ilp import recursion_exp as recursion 
-from IM_ilp.recursion_exp import to_pm4py_tree
+from IM_ilp import recursion_exp as recursion
 from IM_ilp.post_recursion import save_multiple_petri_nets_to_pdf
 import time
 
-log_path = 'BPI_Challenge_2017.xes' 
-log = xes_importer.apply(log_path)
+log_path = 'sample_logs/BPI_Challenge_2017.xes' 
 
-net_03, im_03, fm_03, time_taken_03 = recursion.apply(log, sup=0.3)
+net_03, im_03, fm_03 = recursion.apply(log, sup=0.3, print_time_taken=True)
 
-net_06, im_06, fm_06, time_taken_06 = recursion.apply(log, sup=0.6)
+net_06, im_06, fm_06 = recursion.apply(log, sup=0.6, print_time_taken=True)
 
 petri_nets = [
     (net_exp_03, im_exp_03, fm_exp_03),
