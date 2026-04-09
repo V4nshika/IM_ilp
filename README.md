@@ -30,8 +30,12 @@ Current implementation uses cost functions from the [**IMbi** framework](https:/
 ### 🚀 Usage
 
 ```python
-import pm4py
-# Add your discovery logic here
+from IM_ilp import recursion_exp as recursion
+
+log_path = 'sample_logs/BPI_2012_A_O.xes' 
+
+net, im, fm = recursion.apply(log, sup=0.5, print_time_taken=True)
+
 ```
 
 ---
